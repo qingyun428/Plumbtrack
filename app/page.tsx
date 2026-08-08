@@ -14,6 +14,7 @@ import {
   CircleUserRound,
   Clock3,
   Download,
+  Droplets,
   ExternalLink,
   FileText,
   FolderKanban,
@@ -31,6 +32,7 @@ import {
   Users,
   X,
 } from "lucide-react";
+import WaterPumpPage from "./WaterPumpPage";
 import { useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -44,6 +46,7 @@ type View =
   | "team"
   | "activity"
   | "settings"
+  | "water-pump"
   | "detail"
   | "new-project";
 
@@ -310,6 +313,7 @@ const navItems = [
   { id: "dashboard" as View, label: "Dashboard", icon: LayoutDashboard },
   { id: "projects" as View, label: "Projects", icon: FolderKanban, badge: "10" },
   { id: "records" as View, label: "Records", icon: FileText },
+  { id: "water-pump" as View, label: "Water Pump", icon: Droplets },
   { id: "calendar" as View, label: "Calendar & Reminder", icon: CalendarDays },
   { id: "team" as View, label: "Team", icon: Users },
   { id: "activity" as View, label: "Activity Log", icon: Activity },
@@ -395,6 +399,7 @@ export default function HomePage() {
         {view === "dashboard" && <Dashboard projects={projects} onOpen={openProject} onAdd={() => navigate("new-project")} />}
         {view === "projects" && <Projects projects={projects} onOpen={openProject} onAdd={() => navigate("new-project")} />}
         {view === "records" && <Records records={records} setRecords={setRecords} projects={projects} showToast={showToast} />}
+        {view === "water-pump" && <WaterPumpPage showToast={showToast} />}
         {view === "calendar" && <CalendarPage onOpen={() => openProject(9)} />}
         {view === "team" && <TeamPage showToast={showToast} />}
         {view === "activity" && <ActivityPage />}
