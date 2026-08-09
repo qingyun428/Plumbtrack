@@ -4,7 +4,7 @@ A responsive plumbing project-control workspace with project registers, a fourte
 
 ## Local preview
 
-1. Install Node.js 22 or newer.
+1. Install Node.js 24.
 2. Run `npm install`.
 3. Copy `.env.example` to `.env.local` if you want to configure Supabase.
 4. Run `npm run dev`.
@@ -24,7 +24,14 @@ Without Supabase values the application runs with realistic in-memory preview da
 
 ## GitHub and Vercel
 
-Create a GitHub repository and push this folder when ready. Import that repository into Vercel, add the same environment variables in Project Settings, and redeploy. Set `NEXT_PUBLIC_SITE_URL` to the final production URL.
+Import `qingyun428/Plumbtrack` into Vercel as a Next.js project. Vercel will run the Node.js build from `package.json`:
+
+- Install command: `npm install`
+- Build command: `npm run build`
+- Development command: `npm run dev`
+- Node.js version: `24.x`
+
+Add the same Supabase environment variables in Vercel Project Settings, then redeploy. Set `NEXT_PUBLIC_SITE_URL` to the final production URL.
 
 ## Quality checks
 

@@ -148,8 +148,9 @@ h3, h4 { margin: 0; }
 .record-actions { display: flex; flex-wrap: wrap; gap: 5px; }
 .record-actions button { min-height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 0 7px; color: #93aabc; background: #102a3b; border: 1px solid #224156; border-radius: 5px; font-size: 8px; }
 .record-actions button.danger { color: var(--pink); }
-.modal-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px; background: rgba(2,9,16,.8); backdrop-filter: blur(6px); }
-.preview-modal { width: min(700px,95vw); overflow: hidden; background: #0b1e2d; border: 1px solid #27495e; border-radius: 14px; box-shadow: 0 30px 80px rgba(0,0,0,.45); }
+.modal-layer { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px; }
+.modal-backdrop { position: absolute; inset: 0; border: 0; background: rgba(2,9,16,.8); backdrop-filter: blur(6px); }
+.preview-modal { position: relative; z-index: 1; width: min(700px,95vw); overflow: hidden; background: #0b1e2d; border: 1px solid #27495e; border-radius: 14px; box-shadow: 0 30px 80px rgba(0,0,0,.45); }
 .preview-modal header { display: grid; grid-template-columns: 40px 1fr auto; align-items: center; gap: 10px; padding: 15px; border-bottom: 1px solid var(--border); }
 .preview-modal header strong { display: block; font-size: 11px; }.preview-modal header small { display: block; margin-top: 4px; color: var(--muted); font-size: 9px; }.preview-modal header button { background: none; border: 0; }
 .mock-document { min-height: 420px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #557286; background: linear-gradient(rgba(255,255,255,.015), rgba(255,255,255,.008)), repeating-linear-gradient(0deg, transparent, transparent 28px, rgba(255,255,255,.015) 29px); }
