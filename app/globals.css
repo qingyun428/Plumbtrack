@@ -50,6 +50,14 @@ input, select, textarea { color-scheme: dark; }
 
 .main-content { min-height: 100vh; margin-left: 240px; }
 .mobile-topbar { display: none; }
+.supabase-strip { width: min(1660px, calc(100% - 9.6vw)); min-height: 48px; margin: 0 auto; padding: 10px 4.8vw 0; display: flex; align-items: center; gap: 10px; color: #b9ccd8; font-size: 11px; font-weight: 700; }
+.supabase-strip.connected { color: #a9f2d1; }
+.supabase-strip.warning { color: #ffd782; }
+.supabase-strip.auth { flex-wrap: wrap; }
+.supabase-strip input { min-height: 34px; width: min(220px, 100%); padding: 0 10px; color: var(--text); background: #091d2b; border: 1px solid var(--border); border-radius: 8px; font-size: 11px; }
+.supabase-strip button { min-height: 34px; padding: 0 12px; color: #06101d; background: var(--cyan); border: 0; border-radius: 8px; font-size: 11px; font-weight: 900; }
+.supabase-strip.connected button { color: #cfe1ea; background: #102a3b; border: 1px solid #244a61; }
+.supabase-strip button:disabled { cursor: wait; opacity: .7; }
 .page { width: 100%; max-width: 1660px; min-height: 100vh; margin: 0 auto; padding: 40px 4.8vw 70px; }
 .page-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 22px; margin-bottom: 30px; }
 .page-header h1, .project-hero h1 { margin: 12px 0 9px; color: var(--text); font-size: clamp(30px, 3vw, 40px); font-weight: 400; line-height: 1.08; letter-spacing: -1.8px; }

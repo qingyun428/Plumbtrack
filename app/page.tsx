@@ -29,10 +29,11 @@ import {
   X,
 } from "lucide-react";
 import WaterPumpPage from "./WaterPumpPage";
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import { getSupabaseBrowserClient } from "@/lib/supabase";
 
 type View =
   | "dashboard"
@@ -47,7 +48,7 @@ type View =
   | "new-project";
 
 type Project = {
-  id: number;
+  id: string | number;
   code: string;
   name: string;
   reference: string;
@@ -61,6 +62,7 @@ type Project = {
   start: string;
   records: number;
   active: boolean;
+  createdAt?: string;
 };
 
 type RecordItem = {
@@ -81,6 +83,25 @@ type StageStatus =
   | "Waiting Approval"
   | "Completed"
   | "N/A";
+
+type SupabaseConnection = "checking" | "signed-out" | "connected" | "local";
+
+type SupabaseProjectRow = {
+  id: string;
+  name: string;
+  reference: string;
+  description: string | null;
+  site_address: string | null;
+  maincon: string | null;
+  person_in_charge: string | null;
+  start_date: string | null;
+  target_completion_date: string | null;
+  status: "active" | "attention_required" | "delayed" | "completed";
+  progress: number | null;
+  created_at: string | null;
+  project_stages?: { stage_number: number; name: string; status: string }[] | null;
+  records?: { id: string }[] | null;
+};
 
 const projectsSeed: Project[] = [
   {
@@ -312,6 +333,80 @@ const projectSchema = z.object({
 
 type ProjectForm = z.infer<typeof projectSchema>;
 
+const supabaseProjectSelect =
+  "id,name,reference,description,site_address,maincon,person_in_charge,start_date,target_completion_date,status,progress,created_at,project_stages(stage_number,name,status),records(id)";
+
+function projectCode(name: string) {
+  const digits = name.replace(/\D/g, "").slice(0, 2);
+  if (digits) return digits;
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase() || "PT";
+}
+
+function formatProjectDate(value: string | null | undefined) {
+  if (!value) return "Not set";
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function mapSupabaseProject(row: SupabaseProjectRow): Project {
+  const orderedStages = [...(row.project_stages ?? [])].sort(
+    (a, b) => a.stage_number - b.stage_number,
+  );
+  const currentStage =
+    orderedStages.find(
+      (stage) =>
+        stage.status !== "completed" && stage.status !== "not_applicable",
+    ) ?? orderedStages[0];
+
+  return {
+    id: row.id,
+    code: projectCode(row.name),
+    name: row.name,
+    reference: row.reference,
+    description: row.description || row.site_address || "No description saved",
+    maincon: row.maincon || "Not set",
+    pic: row.person_in_charge || "Not set",
+    step: currentStage?.stage_number ?? 1,
+    stage: currentStage?.name ?? stages[0][0],
+    progress: row.progress ?? 0,
+    target: formatProjectDate(row.target_completion_date),
+    start: formatProjectDate(row.start_date),
+    records: row.records?.length ?? 0,
+    active: row.status !== "completed",
+    createdAt: row.created_at ?? undefined,
+  };
+}
+
+function createLocalProject(data: ProjectForm): Project {
+  return {
+    id: `local-${Date.now()}`,
+    code: projectCode(data.name),
+    name: data.name.toUpperCase(),
+    reference: data.reference,
+    description: data.address,
+    maincon: data.maincon,
+    pic: data.pic,
+    step: 1,
+    stage: "DP & DC Clearance",
+    progress: 0,
+    target: data.target || "Not set",
+    start: data.start,
+    records: 0,
+    active: true,
+  };
+}
+
 const navItems = [
   { id: "dashboard" as View, label: "Dashboard", icon: LayoutDashboard },
   { id: "projects" as View, label: "Projects", icon: FolderKanban, badge: "10" },
@@ -337,33 +432,269 @@ function SearchBox({ value, onChange, placeholder }: { value: string; onChange: 
   );
 }
 
+function SupabaseConnectionPanel({ connection, email, loading, onSignIn, onSignOut }: { connection: SupabaseConnection; email: string | null; loading: boolean; onSignIn: (email: string, password: string) => void; onSignOut: () => void }) {
+  const [loginEmail, setLoginEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  if (connection === "connected") {
+    return <div className="supabase-strip connected"><ShieldCheck size={16} /><span>Supabase connected as {email}</span><button onClick={onSignOut}>Sign out</button></div>;
+  }
+
+  if (connection === "checking") {
+    return <div className="supabase-strip"><Hourglass size={16} /><span>Checking Supabase session...</span></div>;
+  }
+
+  if (connection === "local") {
+    return <div className="supabase-strip warning"><AlertCircle size={16} /><span>Local preview data is showing. Check Supabase environment variables and Auth.</span></div>;
+  }
+
+  return (
+    <form className="supabase-strip auth" onSubmit={(event) => { event.preventDefault(); onSignIn(loginEmail, password); }}>
+      <ShieldCheck size={16} />
+      <span>Sign in to load Supabase projects</span>
+      <input type="email" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} placeholder="Supabase email" required />
+      <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password" required />
+      <button disabled={loading}>{loading ? "Signing in..." : "Sign in"}</button>
+    </form>
+  );
+}
+
 export default function HomePage() {
   const [view, setView] = useState<View>("dashboard");
   const [projects, setProjects] = useState(projectsSeed);
   const [records, setRecords] = useState(recordSeed);
-  const [selectedId, setSelectedId] = useState(1);
+  const [selectedId, setSelectedId] = useState<Project["id"]>(projectsSeed[0].id);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [toast, setToast] = useState("");
+  const [connection, setConnection] = useState<SupabaseConnection>(() =>
+    getSupabaseBrowserClient() ? "checking" : "local",
+  );
+  const [sessionEmail, setSessionEmail] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const showToast = (message: string) => {
+  const showToast = useCallback((message: string) => {
     setToast(message);
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(""), 2600);
-  };
+  }, []);
 
-  const navigate = (next: View) => {
+  const loadSupabaseProjects = useCallback(async () => {
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase) return;
+
+    const { data, error } = await supabase
+      .from("projects")
+      .select(supabaseProjectSelect)
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    const nextProjects = ((data ?? []) as SupabaseProjectRow[]).map(
+      mapSupabaseProject,
+    );
+    setProjects(nextProjects);
+    if (nextProjects[0]) setSelectedId(nextProjects[0].id);
+    setConnection("connected");
+  }, []);
+
+  useEffect(() => {
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase) return;
+
+    let mounted = true;
+    supabase.auth.getSession().then(async ({ data }) => {
+      if (!mounted) return;
+      const email = data.session?.user.email ?? null;
+      setSessionEmail(email);
+      if (!data.session) {
+        setConnection("signed-out");
+        return;
+      }
+      try {
+        await loadSupabaseProjects();
+      } catch (error) {
+        console.error(error);
+        setConnection("local");
+        showToast("Supabase read failed. Check Auth and RLS.");
+      }
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange(
+      async (_event, session) => {
+        if (!mounted) return;
+        setSessionEmail(session?.user.email ?? null);
+        if (!session) {
+          setConnection("signed-out");
+          setProjects(projectsSeed);
+          setSelectedId(projectsSeed[0].id);
+          return;
+        }
+        try {
+          await loadSupabaseProjects();
+          showToast("Supabase connected");
+        } catch (error) {
+          console.error(error);
+          setConnection("local");
+          showToast("Supabase read failed. Check Auth and RLS.");
+        }
+      },
+    );
+
+    return () => {
+      mounted = false;
+      listener.subscription.unsubscribe();
+    };
+  }, [loadSupabaseProjects, showToast]);
+
+  const navigate = useCallback((next: View) => {
     setView(next);
     setSidebarOpen(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
-  };
+  }, []);
 
-  const openProject = (id: number) => {
+  const openProject = (id: Project["id"]) => {
     setSelectedId(id);
     navigate("detail");
   };
 
-  const selectedProject = projects.find((project) => project.id === selectedId) ?? projects[0];
+  const selectedProject =
+    projects.find((project) => String(project.id) === String(selectedId)) ??
+    projects[0] ??
+    null;
+
+  const signInToSupabase = useCallback(async (email: string, password: string) => {
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase) {
+      setConnection("local");
+      showToast("Supabase environment variables are missing.");
+      return;
+    }
+
+    setAuthLoading(true);
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+    setAuthLoading(false);
+    if (error) {
+      showToast(error.message);
+      return;
+    }
+    showToast("Signed in to Supabase");
+  }, [showToast]);
+
+  const signOutFromSupabase = useCallback(async () => {
+    const supabase = getSupabaseBrowserClient();
+    await supabase?.auth.signOut();
+    showToast("Signed out from Supabase");
+  }, [showToast]);
+
+  const createProject = useCallback(async (data: ProjectForm) => {
+    const fallback = createLocalProject(data);
+    setProjects((current) => [fallback, ...current]);
+    setSelectedId(fallback.id);
+    navigate("detail");
+
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase || connection !== "connected") {
+      showToast("Project saved locally. Sign in to save to Supabase.");
+      return;
+    }
+
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    if (!session) {
+      showToast("Sign in to Supabase before saving.");
+      return;
+    }
+
+    const { data: savedProject, error } = await supabase
+      .from("projects")
+      .insert({
+        name: data.name.toUpperCase(),
+        reference: data.reference,
+        description: data.address,
+        site_address: data.address,
+        maincon: data.maincon,
+        person_in_charge: data.pic,
+        start_date: data.start,
+        target_completion_date: data.target || null,
+        status: "active",
+        temporary_water_required: data.temporaryWater === "yes",
+        public_sewer_connection: data.publicSewer === "yes",
+        progress: 0,
+        created_by: session.user.id,
+      })
+      .select(supabaseProjectSelect)
+      .single();
+
+    if (error) {
+      showToast(`Supabase save failed: ${error.message}`);
+      return;
+    }
+
+    const stageRows = stages.map(([name, description], index) => ({
+      project_id: savedProject.id,
+      stage_number: index + 1,
+      name,
+      description,
+      status:
+        data.publicSewer === "no" && (index === 3 || index === 5)
+          ? "not_applicable"
+          : index === 0
+            ? "waiting_approval"
+            : "not_started",
+      applicable: !(data.publicSewer === "no" && (index === 3 || index === 5)),
+      updated_by: session.user.id,
+    }));
+
+    const { error: stageError } = await supabase
+      .from("project_stages")
+      .insert(stageRows);
+    if (stageError) {
+      showToast(`Project saved, stage setup failed: ${stageError.message}`);
+      return;
+    }
+
+    const mappedProject = mapSupabaseProject({
+      ...(savedProject as SupabaseProjectRow),
+      project_stages: stageRows.map((row) => ({
+        stage_number: row.stage_number,
+        name: row.name,
+        status: row.status,
+      })),
+    });
+    setProjects((current) =>
+      current.map((project) =>
+        String(project.id) === String(fallback.id) ? mappedProject : project,
+      ),
+    );
+    setSelectedId(mappedProject.id);
+    showToast("Project saved to Supabase");
+  }, [connection, navigate, showToast]);
+
+  const updateProject = useCallback(async (id: Project["id"], patch: Partial<Project>) => {
+    setProjects((current) =>
+      current.map((project) =>
+        String(project.id) === String(id) ? { ...project, ...patch } : project,
+      ),
+    );
+
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase || connection !== "connected" || String(id).startsWith("local-")) {
+      return;
+    }
+
+    const dbPatch: Record<string, string | number> = {};
+    if (patch.progress !== undefined) dbPatch.progress = patch.progress;
+    if (patch.active !== undefined) dbPatch.status = patch.active ? "active" : "completed";
+    if (Object.keys(dbPatch).length === 0) return;
+
+    const { error } = await supabase.from("projects").update(dbPatch).eq("id", id);
+    if (error) showToast(`Supabase update failed: ${error.message}`);
+  }, [connection, showToast]);
 
   return (
     <div className="app-shell">
@@ -399,28 +730,28 @@ export default function HomePage() {
           <div className="brand-mark compact">PT</div><strong>PlumbTrack</strong>
           <button className="mobile-add" onClick={() => navigate("new-project")} aria-label="Add project"><Plus size={21} /></button>
         </div>
+        <SupabaseConnectionPanel connection={connection} email={sessionEmail} loading={authLoading} onSignIn={signInToSupabase} onSignOut={signOutFromSupabase} />
         {view === "dashboard" && <Dashboard projects={projects} onOpen={openProject} onAdd={() => navigate("new-project")} />}
         {view === "projects" && <Projects projects={projects} onOpen={openProject} onAdd={() => navigate("new-project")} />}
         {view === "records" && <Records records={records} setRecords={setRecords} projects={projects} showToast={showToast} />}
         {view === "water-pump" && <WaterPumpPage showToast={showToast} />}
-        {view === "calendar" && <CalendarPage onOpen={() => openProject(9)} />}
+        {view === "calendar" && <CalendarPage onOpen={() => projects[0] ? openProject(projects[0].id) : navigate("projects")} />}
         {view === "team" && <TeamPage showToast={showToast} />}
         {view === "activity" && <ActivityPage />}
         {view === "settings" && <SettingsPage showToast={showToast} />}
-        {view === "detail" && <ProjectDetail project={selectedProject} onBack={() => navigate("projects")} onUpdate={(patch) => setProjects((current) => current.map((p) => p.id === selectedProject.id ? { ...p, ...patch } : p))} onUpload={(record) => setRecords((current) => [record, ...current])} showToast={showToast} />}
-        {view === "new-project" && <NewProjectPage onCancel={() => navigate("projects")} onCreate={(data) => {
-          const next: Project = { id: Date.now(), code: data.name.replace(/\D/g, "").slice(0, 2) || "NP", name: data.name.toUpperCase(), reference: data.reference, description: data.address, maincon: data.maincon, pic: data.pic, step: 1, stage: "DP & DC Clearance", progress: 0, target: data.target || "Not set", start: data.start, records: 0, active: true };
-          setProjects((current) => [next, ...current]); setSelectedId(next.id); showToast("Project and 14-stage workflow created"); navigate("detail");
-        }} />}
+        {view === "detail" && selectedProject && <ProjectDetail project={selectedProject} onBack={() => navigate("projects")} onUpdate={(patch) => updateProject(selectedProject.id, patch)} onUpload={(record) => setRecords((current) => [record, ...current])} showToast={showToast} />}
+        {view === "detail" && !selectedProject && <div className="page"><div className="panel standalone"><EmptyState title="No project selected." /></div></div>}
+        {view === "new-project" && <NewProjectPage onCancel={() => navigate("projects")} onCreate={createProject} />}
       </main>
       {toast && <div className="toast"><Check size={17} />{toast}</div>}
     </div>
   );
 }
 
-function Dashboard({ projects, onOpen, onAdd }: { projects: Project[]; onOpen: (id: number) => void; onAdd: () => void }) {
+function Dashboard({ projects, onOpen, onAdd }: { projects: Project[]; onOpen: (id: Project["id"]) => void; onAdd: () => void }) {
   const [search, setSearch] = useState("");
   const visible = projects.filter((p) => `${p.name} ${p.description} ${p.maincon} ${p.pic}`.toLowerCase().includes(search.toLowerCase())).slice(0, 6);
+  const queuedProjects = projects.slice(0, 5);
   const metrics = [
     { label: "Active Projects", value: String(projects.filter((p) => p.active).length), note: "0 require attention", icon: FolderKanban, accent: "cyan" },
     { label: "Average Progress", value: "22%", note: "22%", icon: ArrowUpRight, accent: "mint", progress: 22 },
@@ -452,10 +783,8 @@ function Dashboard({ projects, onOpen, onAdd }: { projects: Project[]; onOpen: (
         </article>
         <article className="panel queue-panel">
           <div className="panel-header simple"><div><Eyebrow>ACTION QUEUE</Eyebrow><h2>Waiting for reply</h2></div><span className="count-badge">5</span></div>
-          {[[1,"DP & DC Clearance"],[4,"Permanent Water Submission"],[6,"Shop Drawing & Maincon Approval"],[7,"Shop Drawing & Maincon Approval"],[9,"Temporary Water Submission"]].map(([id,stage]) => {
-            const p = projects.find((item) => item.id === id)!;
-            return <button className="queue-row" key={id} onClick={() => onOpen(Number(id))}><span><strong>{p.name}</strong><small>{stage}</small></span><ArrowRight size={15} /></button>;
-          })}
+          {queuedProjects.map((project) => <button className="queue-row" key={project.id} onClick={() => onOpen(project.id)}><span><strong>{project.name}</strong><small>{project.stage}</small></span><ArrowRight size={15} /></button>)}
+          {queuedProjects.length === 0 && <EmptyState title="No projects waiting." icon="check" />}
         </article>
         <article className="panel status-panel"><div className="panel-header simple"><div><Eyebrow>SCHEDULE</Eyebrow><h2>Delayed projects</h2></div><span className="count-badge">0</span></div><EmptyState title="All target dates are on track." icon="check" /></article>
         <article className="panel records-panel span-2"><div className="panel-header simple"><div><Eyebrow>RECENT RECORDS</Eyebrow><h2>Latest uploads</h2></div><span className="muted-count">11 total</span></div>{recordSeed.slice(0,5).map((record) => <div className="latest-row" key={record.id}><span className="file-badge">PDF</span><span><strong>{record.name}</strong><small>{record.project} · {record.category}</small></span><time>{record.date}</time></div>)}</article>
@@ -474,13 +803,13 @@ function ProjectRow({ project, onClick }: { project: Project; onClick: () => voi
   );
 }
 
-function Projects({ projects, onOpen, onAdd }: { projects: Project[]; onOpen: (id: number) => void; onAdd: () => void }) {
+function Projects({ projects, onOpen, onAdd }: { projects: Project[]; onOpen: (id: Project["id"]) => void; onAdd: () => void }) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
   const [sort, setSort] = useState("latest");
   const visible = useMemo(() => {
     const found = projects.filter((p) => `${p.name} ${p.description} ${p.maincon} ${p.pic} ${p.reference}`.toLowerCase().includes(search.toLowerCase()) && (filter === "all" || (filter === "active" && p.active) || p.stage === filter || p.maincon === filter));
-    return [...found].sort((a,b) => sort === "progress" ? b.progress - a.progress : sort === "name" ? a.name.localeCompare(b.name) : b.id - a.id);
+    return [...found].sort((a,b) => sort === "progress" ? b.progress - a.progress : sort === "name" ? a.name.localeCompare(b.name) : (Date.parse(b.createdAt ?? "") || Number(b.id) || 0) - (Date.parse(a.createdAt ?? "") || Number(a.id) || 0));
   }, [projects, search, filter, sort]);
   return (
     <div className="page">

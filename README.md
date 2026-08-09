@@ -9,6 +9,7 @@ A responsive plumbing project-control workspace with project registers, a fourte
 3. Copy `.env.example` to `.env.local` if you want to configure Supabase.
 4. Run `npm run dev`.
 5. Open `http://localhost:3000`.
+6. Sign in with the Supabase Auth user that also has an `administrator` row in `public.profiles`.
 
 Without Supabase values the application runs with realistic in-memory preview data. Preview changes reset after a reload.
 
@@ -21,6 +22,7 @@ Without Supabase values the application runs with realistic in-memory preview da
 5. Copy the project URL and anon key into `.env.local`.
 6. Keep `SUPABASE_SERVICE_ROLE_KEY` server-only. Never expose it in client code or commit it.
 7. The migration creates the private `project-records` storage bucket and its access policies.
+8. The app reads and writes projects only after a Supabase Auth sign-in. If you can query `public.projects` in SQL but cannot see it in the app, sign in from the top Supabase bar first.
 
 ## GitHub and Vercel
 
