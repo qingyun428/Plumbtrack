@@ -53,6 +53,7 @@ input, select, textarea { color-scheme: dark; }
 .supabase-strip { width: min(1660px, calc(100% - 9.6vw)); min-height: 48px; margin: 0 auto; padding: 10px 4.8vw 0; display: flex; align-items: center; gap: 10px; color: #b9ccd8; font-size: 11px; font-weight: 700; }
 .supabase-strip.connected { color: #a9f2d1; }
 .supabase-strip.warning { color: #ffd782; }
+.supabase-strip.error { color: #ff9aa7; }
 .supabase-strip.auth { flex-wrap: wrap; }
 .supabase-strip input { min-height: 34px; width: min(220px, 100%); padding: 0 10px; color: var(--text); background: #091d2b; border: 1px solid var(--border); border-radius: 8px; font-size: 11px; }
 .supabase-strip button { min-height: 34px; padding: 0 12px; color: #06101d; background: var(--cyan); border: 0; border-radius: 8px; font-size: 11px; font-weight: 900; }

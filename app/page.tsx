@@ -33,7 +33,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { getSupabaseBrowserClient } from "@/lib/supabase";
+import { getSupabaseBrowserClient, getSupabaseConfigStatus } from "@/lib/supabase";
 
 type View =
   | "dashboard"
@@ -84,7 +84,12 @@ type StageStatus =
   | "Completed"
   | "N/A";
 
-type SupabaseConnection = "checking" | "signed-out" | "connected" | "local";
+type SupabaseConnection =
+  | "checking"
+  | "missing-env"
+  | "signed-out"
+  | "connected"
+  | "read-error";
 
 type SupabaseProjectRow = {
   id: string;
@@ -432,26 +437,30 @@ function SearchBox({ value, onChange, placeholder }: { value: string; onChange: 
   );
 }
 
-function SupabaseConnectionPanel({ connection, email, loading, onSignIn, onSignOut }: { connection: SupabaseConnection; email: string | null; loading: boolean; onSignIn: (email: string, password: string) => void; onSignOut: () => void }) {
+function SupabaseConnectionPanel({ connection, detail, email, loading, onSignIn, onSignOut }: { connection: SupabaseConnection; detail: string; email: string | null; loading: boolean; onSignIn: (email: string, password: string) => void; onSignOut: () => void }) {
   const [loginEmail, setLoginEmail] = useState("");
   const [password, setPassword] = useState("");
 
   if (connection === "connected") {
-    return <div className="supabase-strip connected"><ShieldCheck size={16} /><span>Supabase connected as {email}</span><button onClick={onSignOut}>Sign out</button></div>;
+    return <div className="supabase-strip connected"><ShieldCheck size={16} /><span>{detail || `Supabase connected as ${email}`}</span><button onClick={onSignOut}>Sign out</button></div>;
   }
 
   if (connection === "checking") {
-    return <div className="supabase-strip"><Hourglass size={16} /><span>Checking Supabase session...</span></div>;
+    return <div className="supabase-strip"><Hourglass size={16} /><span>{detail || "Checking Supabase session..."}</span></div>;
   }
 
-  if (connection === "local") {
-    return <div className="supabase-strip warning"><AlertCircle size={16} /><span>Local preview data is showing. Check Supabase environment variables and Auth.</span></div>;
+  if (connection === "missing-env") {
+    return <div className="supabase-strip warning"><AlertCircle size={16} /><span>{detail}</span></div>;
+  }
+
+  if (connection === "read-error") {
+    return <div className="supabase-strip error"><AlertCircle size={16} /><span>{detail}</span></div>;
   }
 
   return (
     <form className="supabase-strip auth" onSubmit={(event) => { event.preventDefault(); onSignIn(loginEmail, password); }}>
       <ShieldCheck size={16} />
-      <span>Sign in to load Supabase projects</span>
+      <span>{detail || "Sign in to load Supabase projects"}</span>
       <input type="email" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} placeholder="Supabase email" required />
       <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password" required />
       <button disabled={loading}>{loading ? "Signing in..." : "Sign in"}</button>
@@ -467,8 +476,19 @@ export default function HomePage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [toast, setToast] = useState("");
   const [connection, setConnection] = useState<SupabaseConnection>(() =>
-    getSupabaseBrowserClient() ? "checking" : "local",
+    getSupabaseBrowserClient() ? "checking" : "missing-env",
   );
+  const [connectionDetail, setConnectionDetail] = useState(() => {
+    const status = getSupabaseConfigStatus();
+    if (status.hasUrl && status.hasAnonKey) {
+      return "Checking Supabase session...";
+    }
+    const missing = [
+      !status.hasUrl ? "NEXT_PUBLIC_SUPABASE_URL" : null,
+      !status.hasAnonKey ? "NEXT_PUBLIC_SUPABASE_ANON_KEY" : null,
+    ].filter(Boolean);
+    return `Supabase is not in this build. Add ${missing.join(" and ")} in Vercel, then redeploy.`;
+  });
   const [sessionEmail, setSessionEmail] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -479,7 +499,7 @@ export default function HomePage() {
     toastTimer.current = setTimeout(() => setToast(""), 2600);
   }, []);
 
-  const loadSupabaseProjects = useCallback(async () => {
+  const loadSupabaseProjects = useCallback(async (email?: string | null) => {
     const supabase = getSupabaseBrowserClient();
     if (!supabase) return;
 
@@ -496,6 +516,11 @@ export default function HomePage() {
     setProjects(nextProjects);
     if (nextProjects[0]) setSelectedId(nextProjects[0].id);
     setConnection("connected");
+    setConnectionDetail(
+      nextProjects.length > 0
+        ? `Supabase connected as ${email ?? "signed-in user"} - ${nextProjects.length} project(s) loaded.`
+        : `Supabase connected as ${email ?? "signed-in user"} - no projects found in public.projects.`,
+    );
   }, []);
 
   useEffect(() => {
@@ -509,14 +534,17 @@ export default function HomePage() {
       setSessionEmail(email);
       if (!data.session) {
         setConnection("signed-out");
+        setConnectionDetail("Supabase variables found. Sign in with your Supabase Auth email/password to load projects.");
         return;
       }
       try {
-        await loadSupabaseProjects();
+        await loadSupabaseProjects(email);
       } catch (error) {
         console.error(error);
-        setConnection("local");
-        showToast("Supabase read failed. Check Auth and RLS.");
+        const message = error instanceof Error ? error.message : "Unknown Supabase read error";
+        setConnection("read-error");
+        setConnectionDetail(`Supabase read failed: ${message}`);
+        showToast("Supabase read failed. See the top status bar.");
       }
     });
 
@@ -526,17 +554,20 @@ export default function HomePage() {
         setSessionEmail(session?.user.email ?? null);
         if (!session) {
           setConnection("signed-out");
+          setConnectionDetail("Supabase variables found. Sign in with your Supabase Auth email/password to load projects.");
           setProjects(projectsSeed);
           setSelectedId(projectsSeed[0].id);
           return;
         }
         try {
-          await loadSupabaseProjects();
+          await loadSupabaseProjects(session.user.email ?? null);
           showToast("Supabase connected");
         } catch (error) {
           console.error(error);
-          setConnection("local");
-          showToast("Supabase read failed. Check Auth and RLS.");
+          const message = error instanceof Error ? error.message : "Unknown Supabase read error";
+          setConnection("read-error");
+          setConnectionDetail(`Supabase read failed: ${message}`);
+          showToast("Supabase read failed. See the top status bar.");
         }
       },
     );
@@ -566,7 +597,8 @@ export default function HomePage() {
   const signInToSupabase = useCallback(async (email: string, password: string) => {
     const supabase = getSupabaseBrowserClient();
     if (!supabase) {
-      setConnection("local");
+      setConnection("missing-env");
+      setConnectionDetail("Supabase environment variables are missing in this deployment.");
       showToast("Supabase environment variables are missing.");
       return;
     }
@@ -578,6 +610,8 @@ export default function HomePage() {
     });
     setAuthLoading(false);
     if (error) {
+      setConnection("signed-out");
+      setConnectionDetail(`Supabase sign-in failed: ${error.message}`);
       showToast(error.message);
       return;
     }
@@ -730,7 +764,7 @@ export default function HomePage() {
           <div className="brand-mark compact">PT</div><strong>PlumbTrack</strong>
           <button className="mobile-add" onClick={() => navigate("new-project")} aria-label="Add project"><Plus size={21} /></button>
         </div>
-        <SupabaseConnectionPanel connection={connection} email={sessionEmail} loading={authLoading} onSignIn={signInToSupabase} onSignOut={signOutFromSupabase} />
+        <SupabaseConnectionPanel connection={connection} detail={connectionDetail} email={sessionEmail} loading={authLoading} onSignIn={signInToSupabase} onSignOut={signOutFromSupabase} />
         {view === "dashboard" && <Dashboard projects={projects} onOpen={openProject} onAdd={() => navigate("new-project")} />}
         {view === "projects" && <Projects projects={projects} onOpen={openProject} onAdd={() => navigate("new-project")} />}
         {view === "records" && <Records records={records} setRecords={setRecords} projects={projects} showToast={showToast} />}
