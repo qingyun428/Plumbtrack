@@ -28,7 +28,6 @@ import {
   Users,
   X,
 } from "lucide-react";
-import WaterPumpPage from "./WaterPumpPage";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -469,6 +468,7 @@ function SupabaseConnectionPanel({ connection, detail, email, loading, onSignIn,
 }
 
 export default function HomePage() {
+  const waterPumpUrl = process.env.NEXT_PUBLIC_WATER_PUMP_URL?.trim() || "/water-pump";
   const [view, setView] = useState<View>("dashboard");
   const [projects, setProjects] = useState(projectsSeed);
   const [records, setRecords] = useState(recordSeed);
@@ -579,10 +579,14 @@ export default function HomePage() {
   }, [loadSupabaseProjects, showToast]);
 
   const navigate = useCallback((next: View) => {
+    if (next === "water-pump") {
+      window.location.assign(waterPumpUrl);
+      return;
+    }
     setView(next);
     setSidebarOpen(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
-  }, []);
+  }, [waterPumpUrl]);
 
   const openProject = (id: Project["id"]) => {
     setSelectedId(id);
@@ -768,7 +772,6 @@ export default function HomePage() {
         {view === "dashboard" && <Dashboard projects={projects} onOpen={openProject} onAdd={() => navigate("new-project")} />}
         {view === "projects" && <Projects projects={projects} onOpen={openProject} onAdd={() => navigate("new-project")} />}
         {view === "records" && <Records records={records} setRecords={setRecords} projects={projects} showToast={showToast} />}
-        {view === "water-pump" && <WaterPumpPage showToast={showToast} />}
         {view === "calendar" && <CalendarPage onOpen={() => projects[0] ? openProject(projects[0].id) : navigate("projects")} />}
         {view === "team" && <TeamPage showToast={showToast} />}
         {view === "activity" && <ActivityPage />}
