@@ -213,6 +213,19 @@ h3, h4 { margin: 0; }
   .form-actions { flex-direction: column-reverse; }.form-actions button { width: 100%; }.toast { right: 12px; bottom: 12px; left: 12px; justify-content: center; }
 }
 
+.stage-card.current { border-color: rgba(0, 229, 255, .45); box-shadow: inset 2px 0 var(--cyan); }
+.stage-card.locked { opacity: .48; filter: grayscale(.35); }
+.stage-card.locked.completed { opacity: .88; filter: none; }
+.stage-card.locked .stage-header { cursor: not-allowed; }
+.stage-header:disabled { color: inherit; }
+.stage-header:disabled svg { opacity: .25; transform: none!important; }
+.timeline-number.in-progress { color: #06101d; background: var(--cyan); border-color: var(--cyan); }
+.status-pill.in-progress { color: var(--cyan); background: rgba(0,229,255,.08); border: 1px solid rgba(0,229,255,.24); }
+.status-pill.not-started { color: #8498a6; background: rgba(132,152,166,.08); border: 1px solid rgba(132,152,166,.18); }
+.status-pill.n-a { color: #6f8493; background: rgba(111,132,147,.08); border: 1px solid rgba(111,132,147,.16); }
+.stage-rule-note { margin: 12px 0 0; color: var(--yellow); font-size: 9px; font-weight: 800; }
+.stage-save:disabled,.danger-button:disabled { cursor: not-allowed; opacity: .45; filter: grayscale(.35); }
+
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }
 
 /* Water Pump workspace */

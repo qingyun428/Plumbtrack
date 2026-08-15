@@ -32,6 +32,7 @@ type Project = {
   records: number;
   active: boolean;
   createdAt?: string;
+  stageStatuses?: { stageNumber: number; status: string }[];
 };
 
 type RecordItem = {
@@ -278,7 +279,6 @@ function reminderStatus(dueDate: string, completed: boolean): ReminderItem["stat
 function toDbStageStatus(status: string | undefined) {
   const normalized = (status ?? "").toLowerCase();
   if (normalized.includes("progress")) return "in_progress";
-  if (normalized.includes("approval") || normalized.includes("waiting")) return "waiting_approval";
   if (normalized.includes("complete")) return "completed";
   if (normalized === "n/a" || normalized.includes("not_applicable")) return "not_applicable";
   return "not_started";
@@ -295,9 +295,14 @@ function activityType(action: string): ActivityItem["type"] {
 
 function toProject(row: DbProjectRow): Project {
   const orderedStages = [...(row.project_stages ?? [])].sort((a, b) => a.stage_number - b.stage_number);
+  const allApplicableStagesCompleted =
+    orderedStages.length > 0 &&
+    orderedStages.every((stage) => stage.status === "completed" || stage.status === "not_applicable");
   const currentStage =
-    orderedStages.find((stage) => stage.status !== "completed" && stage.status !== "not_applicable") ??
-    orderedStages[0];
+    allApplicableStagesCompleted
+      ? [...orderedStages].reverse().find((stage) => stage.status !== "not_applicable") ?? orderedStages.at(-1)
+      : orderedStages.find((stage) => stage.status !== "completed" && stage.status !== "not_applicable") ??
+        orderedStages[0];
 
   return {
     id: row.id,
@@ -315,6 +320,10 @@ function toProject(row: DbProjectRow): Project {
     records: row.records?.length ?? 0,
     active: row.status !== "completed",
     createdAt: row.created_at ?? undefined,
+    stageStatuses: orderedStages.map((stage) => ({
+      stageNumber: stage.stage_number,
+      status: stage.status,
+    })),
   };
 }
 
@@ -582,7 +591,7 @@ export async function POST(request: Request) {
         stage_number: index + 1,
         name,
         description,
-        status: notApplicable ? "not_applicable" : index === 0 ? "waiting_approval" : "not_started",
+        status: notApplicable ? "not_applicable" : index === 0 ? "in_progress" : "not_started",
         applicable: !notApplicable,
       };
     });
@@ -620,16 +629,70 @@ export async function POST(request: Request) {
 
   if (payload.action === "saveStage") {
     if (!isUuid(payload.projectId) || !payload.stageNumber) return NextResponse.json({ connected: false });
+    if (toDbStageStatus(payload.status) !== "completed") {
+      return errorResponse("Select Completed before saving this stage.");
+    }
     const { data: stage, error } = await supabase
       .from("project_stages")
-      .update({ status: toDbStageStatus(payload.status) })
+      .update({
+        status: "completed",
+        actual_completion_date: new Date().toISOString().slice(0, 10),
+      })
       .eq("project_id", payload.projectId)
       .eq("stage_number", payload.stageNumber)
-      .select("id,name")
+      .select("id,name,stage_number")
       .single();
     if (error) return errorResponse(error.message);
+
+    const stageRow = stage as { id: string; name: string; stage_number: number };
+    const { error: resetFutureError } = await supabase
+      .from("project_stages")
+      .update({ status: "not_started" })
+      .eq("project_id", payload.projectId)
+      .eq("applicable", true)
+      .gt("stage_number", stageRow.stage_number)
+      .neq("status", "completed");
+    if (resetFutureError) return errorResponse(resetFutureError.message);
+
+    const { data: nextStage } = await supabase
+      .from("project_stages")
+      .select("id,stage_number,name")
+      .eq("project_id", payload.projectId)
+      .eq("applicable", true)
+      .gt("stage_number", stageRow.stage_number)
+      .neq("status", "completed")
+      .order("stage_number", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (nextStage) {
+      const { error: nextStageError } = await supabase
+        .from("project_stages")
+        .update({ status: "in_progress" })
+        .eq("id", (nextStage as { id: string }).id);
+      if (nextStageError) return errorResponse(nextStageError.message);
+    }
+
+    const { data: allStages, error: countError } = await supabase
+      .from("project_stages")
+      .select("status,applicable")
+      .eq("project_id", payload.projectId);
+    if (countError) return errorResponse(countError.message);
+
+    const applicableStages = ((allStages ?? []) as { status: string; applicable: boolean }[]).filter(
+      (item) => item.applicable,
+    );
+    const completedStages = applicableStages.filter((item) => item.status === "completed");
+    const progress = Math.min(100, Math.round((completedStages.length / Math.max(1, applicableStages.length)) * 100));
+
+    const { error: projectProgressError } = await supabase
+      .from("projects")
+      .update({ progress })
+      .eq("id", payload.projectId);
+    if (projectProgressError) return errorResponse(projectProgressError.message);
     await logActivity(supabase, "Updated stage", `${(stage as { name?: string }).name ?? "Stage"} · ${payload.projectId}`, String(payload.projectId), (stage as { id?: string }).id);
-    return NextResponse.json({ connected: true });
+    const project = await fetchProject(payload.projectId);
+    return NextResponse.json({ connected: true, project });
   }
 
   if (payload.action === "saveRecord") {

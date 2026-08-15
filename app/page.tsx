@@ -62,6 +62,7 @@ type Project = {
   records: number;
   active: boolean;
   createdAt?: string;
+  stageStatuses?: { stageNumber: number; status: string }[];
 };
 
 type RecordItem = {
@@ -124,7 +125,6 @@ type SettingsState = {
 type StageStatus =
   | "Not Started"
   | "In Progress"
-  | "Waiting Approval"
   | "Completed"
   | "N/A";
 
@@ -530,11 +530,16 @@ function mapSupabaseProject(row: SupabaseProjectRow): Project {
   const orderedStages = [...(row.project_stages ?? [])].sort(
     (a, b) => a.stage_number - b.stage_number,
   );
+  const allApplicableStagesCompleted =
+    orderedStages.length > 0 &&
+    orderedStages.every((stage) => stage.status === "completed" || stage.status === "not_applicable");
   const currentStage =
-    orderedStages.find(
+    allApplicableStagesCompleted
+      ? [...orderedStages].reverse().find((stage) => stage.status !== "not_applicable") ?? orderedStages.at(-1)
+      : orderedStages.find(
       (stage) =>
         stage.status !== "completed" && stage.status !== "not_applicable",
-    ) ?? orderedStages[0];
+      ) ?? orderedStages[0];
 
   return {
     id: row.id,
@@ -552,6 +557,10 @@ function mapSupabaseProject(row: SupabaseProjectRow): Project {
     records: row.records?.length ?? 0,
     active: row.status !== "completed",
     createdAt: row.created_at ?? undefined,
+    stageStatuses: orderedStages.map((stage) => ({
+      stageNumber: stage.stage_number,
+      status: stage.status,
+    })),
   };
 }
 
@@ -571,6 +580,10 @@ function createLocalProject(data: ProjectForm): Project {
     start: data.start,
     records: 0,
     active: true,
+    stageStatuses: stages.map((_, index) => ({
+      stageNumber: index + 1,
+      status: index === 0 ? "in_progress" : (index === 3 || index === 5) ? "not_applicable" : "not_started",
+    })),
   };
 }
 
@@ -897,12 +910,16 @@ export default function HomePage() {
       name,
       description,
       status:
-        data.publicSewer === "no" && (index === 3 || index === 5)
+        (data.temporaryWater === "no" && index === 1) ||
+        (data.publicSewer === "no" && (index === 3 || index === 5))
           ? "not_applicable"
           : index === 0
-            ? "waiting_approval"
+            ? "in_progress"
             : "not_started",
-      applicable: !(data.publicSewer === "no" && (index === 3 || index === 5)),
+      applicable: !(
+        (data.temporaryWater === "no" && index === 1) ||
+        (data.publicSewer === "no" && (index === 3 || index === 5))
+      ),
       updated_by: session.user.id,
     }));
 
@@ -1127,7 +1144,7 @@ export default function HomePage() {
         {view === "team" && <TeamPage members={teamMembers} onCreate={saveTeamMember} onDelete={deleteTeamMember} />}
         {view === "activity" && <ActivityPage activities={activities} />}
         {view === "settings" && <SettingsPage key={JSON.stringify(settings)} settings={settings} onSave={saveSettings} />}
-        {view === "detail" && selectedProject && <ProjectDetail project={selectedProject} onBack={() => navigate("projects")} onUpdate={(patch) => updateProject(selectedProject.id, patch)} onDelete={() => deleteProject(selectedProject)} onUpload={saveRecord} showToast={showToast} />}
+        {view === "detail" && selectedProject && <ProjectDetail key={selectedProject.id} project={selectedProject} onBack={() => navigate("projects")} onUpdate={(patch) => updateProject(selectedProject.id, patch)} onDelete={() => deleteProject(selectedProject)} onUpload={saveRecord} onCompleteClose={() => { updateProject(selectedProject.id, { active: false, progress: 100 }); navigate("records"); }} showToast={showToast} />}
         {view === "detail" && !selectedProject && <div className="page"><div className="panel standalone"><EmptyState title="No project selected." /></div></div>}
         {view === "new-project" && <NewProjectPage onCancel={() => navigate("projects")} onCreate={createProject} />}
       </main>
@@ -1294,12 +1311,68 @@ function LegacySettingsPage({ showToast }: { showToast: (message: string) => voi
 
 void [LegacyCalendarPage, LegacyTeamPage, LegacyActivityPage, LegacySettingsPage];
 
+function stageStatusFromDb(status: string | undefined): StageStatus {
+  if (status === "completed") return "Completed";
+  if (status === "in_progress" || status === "waiting_approval") return "In Progress";
+  if (status === "not_applicable") return "N/A";
+  return "Not Started";
+}
+
+function stageStatusClassName(status: StageStatus) {
+  return status.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+}
+
+function buildInitialStageStatuses(project: Project): StageStatus[] {
+  const statuses = stages.map((_, index): StageStatus =>
+    index === 3 || index === 5 ? "N/A" : "Not Started",
+  );
+
+  project.stageStatuses?.forEach((stage) => {
+    statuses[stage.stageNumber - 1] = stageStatusFromDb(stage.status);
+  });
+
+  if (statuses.some((status) => status === "In Progress")) return statuses;
+  if (statuses.every((status) => status === "Completed" || status === "N/A")) return statuses;
+
+  const currentIndex = Math.max(0, Math.min(stages.length - 1, project.step - 1));
+  if (statuses[currentIndex] !== "Completed" && statuses[currentIndex] !== "N/A") {
+    statuses[currentIndex] = "In Progress";
+    return statuses;
+  }
+
+  const nextIndex = statuses.findIndex((status) => status !== "Completed" && status !== "N/A");
+  if (nextIndex >= 0) statuses[nextIndex] = "In Progress";
+  return statuses;
+}
+
+function advanceStageStatuses(statuses: StageStatus[], completedIndex: number) {
+  const nextStatuses = statuses.map((status, index): StageStatus => {
+    if (index === completedIndex) return "Completed";
+    if (status === "N/A" || status === "Completed") return status;
+    return "Not Started";
+  });
+  const nextIndex = nextStatuses.findIndex((status) => status === "Not Started");
+  if (nextIndex >= 0) nextStatuses[nextIndex] = "In Progress";
+  return nextStatuses;
+}
+
+function stageProgress(statuses: StageStatus[]) {
+  const applicable = statuses.filter((status) => status !== "N/A").length;
+  const completed = statuses.filter((status) => status === "Completed").length;
+  return {
+    applicable,
+    completed,
+    percentage: Math.min(100, Math.round((completed / Math.max(1, applicable)) * 100)),
+  };
+}
+
 function ProjectDetail({
   project,
   onBack,
   onUpdate,
   onDelete,
   onUpload,
+  onCompleteClose,
   showToast,
 }: {
   project: Project;
@@ -1307,42 +1380,59 @@ function ProjectDetail({
   onUpdate: (patch: Partial<Project>) => void;
   onDelete: () => void;
   onUpload: (record: RecordItem) => void;
+  onCompleteClose: () => void;
   showToast: (message: string) => void;
 }) {
-  const [expanded, setExpanded] = useState(0);
-  const [statuses, setStatuses] = useState<StageStatus[]>(() =>
-    stages.map((_, index): StageStatus =>
-      index < project.step - 1
-        ? "Completed"
-        : index === project.step - 1
-          ? "Waiting Approval"
-          : index === 3 || index === 5
-            ? "N/A"
-            : "Not Started",
-    ),
-  );
+  const initialStatuses = useMemo(() => buildInitialStageStatuses(project), [project]);
+  const [expanded, setExpanded] = useState(() => {
+    const initialIndex = initialStatuses.findIndex((status) => status === "In Progress");
+    return initialIndex >= 0 ? initialIndex : -1;
+  });
+  const [statuses, setStatuses] = useState<StageStatus[]>(initialStatuses);
   const uploadRef = useRef<HTMLInputElement>(null);
+  const currentStageIndex = statuses.findIndex((status) => status === "In Progress");
+  const allStagesCompleted = statuses.every((status) => status === "Completed" || status === "N/A");
+  const progress = stageProgress(statuses);
 
-  const saveStage = (stageNumber: number, status: StageStatus) => {
-    if (isPersistedId(project.id)) {
-      plumbtrackApi("saveStage", {
+  const saveStage = async (stageNumber: number, status: StageStatus) => {
+    if (status !== "Completed") {
+      showToast("Please manually choose Completed before saving this step.");
+      return;
+    }
+
+    const nextStatuses = advanceStageStatuses(statuses, stageNumber - 1);
+    const nextIndex = nextStatuses.findIndex((nextStatus) => nextStatus === "In Progress");
+    const nextProgress = stageProgress(nextStatuses);
+    const nextStageName = nextIndex >= 0 ? stages[nextIndex][0] : "All stages completed";
+
+    setStatuses(nextStatuses);
+    setExpanded(nextIndex >= 0 ? nextIndex : -1);
+    onUpdate({
+      progress: nextProgress.percentage,
+      step: nextIndex >= 0 ? nextIndex + 1 : stageNumber,
+      stage: nextStageName,
+      stageStatuses: nextStatuses.map((nextStatus, index) => ({
+        stageNumber: index + 1,
+        status: nextStatus === "In Progress" ? "in_progress" : nextStatus === "Completed" ? "completed" : nextStatus === "N/A" ? "not_applicable" : "not_started",
+      })),
+    });
+
+    if (!isPersistedId(project.id)) {
+      showToast(nextIndex >= 0 ? `Step ${nextIndex + 1} is now In Progress` : "All steps completed. You can close the project.");
+      return;
+    }
+
+    try {
+      const result = await plumbtrackApi("saveStage", {
         projectId: project.id,
         stageNumber,
         status,
-      }).catch((error: unknown) =>
-        showToast(error instanceof Error ? error.message : "Stage sync failed"),
-      );
-    }
-
-    if (status === "Completed") {
-      const applicableStages = statuses.filter((stageStatus) => stageStatus !== "N/A").length;
-      const completedStages = statuses.filter((stageStatus) => stageStatus === "Completed").length + 1;
-      onUpdate({
-        progress: Math.min(100, Math.round((completedStages / Math.max(1, applicableStages)) * 100)),
       });
+      if (result.project) onUpdate(result.project);
+      showToast(nextIndex >= 0 ? `Step ${nextIndex + 1} is now In Progress` : "All steps completed. You can close the project.");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Stage sync failed");
     }
-
-    showToast("Stage changes saved");
   };
 
   const uploadStageFile = (file: File, stageNumber: number, stageName: string) => {
@@ -1429,7 +1519,7 @@ function ProjectDetail({
         <div className="legend">
           <span className="done">Completed</span>
           <span className="doing">In progress</span>
-          <span>Waiting</span>
+          <span>Locked</span>
         </div>
       </div>
 
@@ -1438,18 +1528,25 @@ function ProjectDetail({
           const open = expanded === index;
           const status = statuses[index];
           const stageNumber = index + 1;
-          const statusClassName = status.toLowerCase().replaceAll(" ", "-");
+          const canTouch = index === currentStageIndex;
+          const statusClassName = stageStatusClassName(status);
+          const displayStatus = status === "Not Started" ? "Locked" : status;
 
           return (
-            <article className={`stage-card ${open ? "expanded" : ""}`} key={name}>
+            <article className={`stage-card ${open ? "expanded" : ""} ${canTouch ? "current" : "locked"} ${statusClassName}`} key={name}>
               <span className={`timeline-number ${statusClassName}`}>{stageNumber}</span>
-              <button className="stage-header" onClick={() => setExpanded(open ? -1 : index)} aria-expanded={open}>
+              <button
+                className="stage-header"
+                onClick={() => canTouch && setExpanded(open ? -1 : index)}
+                aria-expanded={open}
+                disabled={!canTouch}
+              >
                 <span>
                   <small>STEP {String(stageNumber).padStart(2, "0")}</small>
                   <h3>{name}</h3>
                   <p>{description}</p>
                 </span>
-                <span className={`status-pill ${statusClassName}`}>{status}</span>
+                <span className={`status-pill ${statusClassName}`}>{displayStatus}</span>
                 <span>{index === 0 ? project.records : 0} records</span>
                 <ChevronDown size={18} />
               </button>
@@ -1469,11 +1566,8 @@ function ProjectDetail({
                           )
                         }
                       >
-                        <option>Not Started</option>
                         <option>In Progress</option>
-                        <option>Waiting Approval</option>
                         <option>Completed</option>
-                        <option>N/A</option>
                       </select>
                     </label>
                     <label>
@@ -1510,15 +1604,16 @@ function ProjectDetail({
                         event.currentTarget.value = "";
                       }}
                     />
-                    <button className="secondary-button" onClick={() => uploadRef.current?.click()}>
+                    <button type="button" className="secondary-button" onClick={() => uploadRef.current?.click()}>
                       <Plus size={15} /> Upload files / photos
                     </button>
                   </div>
 
                   <p className="empty-file">No files uploaded for this step yet.</p>
                   <p className="last-updated">Last updated 08 Aug 2026 by qingyuc832@gmail.com</p>
-                  <button className="primary-button stage-save" onClick={() => saveStage(stageNumber, status)}>
-                    Save stage changes
+                  <p className="stage-rule-note">Manual control: select Completed first, then save. The next step will open automatically.</p>
+                  <button className="primary-button stage-save" disabled={status !== "Completed"} onClick={() => saveStage(stageNumber, status)}>
+                    Save completed stage
                   </button>
                 </div>
               )}
@@ -1532,8 +1627,8 @@ function ProjectDetail({
         <h2>Complete & Close Project</h2>
         <p>Missing items are shown as guidance only. You may still close the project when some records are kept for internal tracking.</p>
         <div className="completion-summary">
-          <strong>2/14</strong>
-          <span>key completion checks ready</span>
+          <strong>{progress.completed}/{progress.applicable}</strong>
+          <span>{allStagesCompleted ? "all steps ready to close" : "complete every active step before closing"}</span>
         </div>
         <div className="check-grid">
           {[
@@ -1559,9 +1654,10 @@ function ProjectDetail({
         </div>
         <button
           className="danger-button"
+          disabled={!allStagesCompleted}
           onClick={() => {
             if (window.confirm("Close this project? This will be recorded in the activity log.")) {
-              onUpdate({ active: false, progress: 100 });
+              onCompleteClose();
               showToast("Project closed and logged");
             }
           }}
