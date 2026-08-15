@@ -63,6 +63,7 @@ type Project = {
   active: boolean;
   createdAt?: string;
   stageStatuses?: { stageNumber: number; status: string }[];
+  stageDetails?: StageDetail[];
 };
 
 type RecordItem = {
@@ -122,6 +123,14 @@ type SettingsState = {
   dataRetention: string;
 };
 
+type StageDetail = {
+  stageNumber: number;
+  expectedDate: string;
+  actualCompletionDate: string;
+  approvalReference: string;
+  notes: string;
+};
+
 type StageStatus =
   | "Not Started"
   | "In Progress"
@@ -148,7 +157,15 @@ type SupabaseProjectRow = {
   status: "active" | "attention_required" | "delayed" | "completed";
   progress: number | null;
   created_at: string | null;
-  project_stages?: { stage_number: number; name: string; status: string }[] | null;
+  project_stages?: {
+    stage_number: number;
+    name: string;
+    status: string;
+    expected_date?: string | null;
+    actual_completion_date?: string | null;
+    notes?: string | null;
+    stage_field_values?: { field_key: string; field_value: string | null }[] | null;
+  }[] | null;
   records?: { id: string }[] | null;
 };
 
@@ -434,7 +451,7 @@ const projectSchema = z.object({
 type ProjectForm = z.infer<typeof projectSchema>;
 
 const supabaseProjectSelect =
-  "id,name,reference,description,site_address,maincon,person_in_charge,start_date,target_completion_date,status,progress,created_at,project_stages(stage_number,name,status),records(id)";
+  "id,name,reference,description,site_address,maincon,person_in_charge,start_date,target_completion_date,status,progress,created_at,project_stages(stage_number,name,status,expected_date,actual_completion_date,notes,stage_field_values(field_key,field_value)),records(id)";
 
 type PlumbtrackApiResponse = {
   connected?: boolean;
@@ -561,6 +578,15 @@ function mapSupabaseProject(row: SupabaseProjectRow): Project {
       stageNumber: stage.stage_number,
       status: stage.status,
     })),
+    stageDetails: orderedStages.map((stage) => ({
+      stageNumber: stage.stage_number,
+      expectedDate: stage.expected_date ?? "",
+      actualCompletionDate: stage.actual_completion_date ?? "",
+      approvalReference:
+        stage.stage_field_values?.find((field) => field.field_key === "approval_reference")?.field_value ??
+        "",
+      notes: stage.notes ?? "",
+    })),
   };
 }
 
@@ -583,6 +609,13 @@ function createLocalProject(data: ProjectForm): Project {
     stageStatuses: stages.map((_, index) => ({
       stageNumber: index + 1,
       status: index === 0 ? "in_progress" : (index === 3 || index === 5) ? "not_applicable" : "not_started",
+    })),
+    stageDetails: stages.map((_, index) => ({
+      stageNumber: index + 1,
+      expectedDate: "",
+      actualCompletionDate: "",
+      approvalReference: "",
+      notes: "",
     })),
   };
 }
@@ -1356,6 +1389,19 @@ function advanceStageStatuses(statuses: StageStatus[], completedIndex: number) {
   return nextStatuses;
 }
 
+function buildInitialStageDetails(project: Project): StageDetail[] {
+  return stages.map((_, index) => {
+    const existing = project.stageDetails?.find((detail) => detail.stageNumber === index + 1);
+    return {
+      stageNumber: index + 1,
+      expectedDate: existing?.expectedDate ?? "",
+      actualCompletionDate: existing?.actualCompletionDate ?? "",
+      approvalReference: existing?.approvalReference ?? "",
+      notes: existing?.notes ?? "",
+    };
+  });
+}
+
 function stageProgress(statuses: StageStatus[]) {
   const applicable = statuses.filter((status) => status !== "N/A").length;
   const completed = statuses.filter((status) => status === "Completed").length;
@@ -1389,36 +1435,73 @@ function ProjectDetail({
     return initialIndex >= 0 ? initialIndex : -1;
   });
   const [statuses, setStatuses] = useState<StageStatus[]>(initialStatuses);
+  const [stageDrafts, setStageDrafts] = useState<StageDetail[]>(() => buildInitialStageDetails(project));
+  const [savedCompletedStages, setSavedCompletedStages] = useState<Set<number>>(
+    () => new Set(initialStatuses.flatMap((status, index) => status === "Completed" ? [index] : [])),
+  );
+  const [editingCompletedStages, setEditingCompletedStages] = useState<Set<number>>(new Set());
   const uploadRef = useRef<HTMLInputElement>(null);
   const currentStageIndex = statuses.findIndex((status) => status === "In Progress");
   const allStagesCompleted = statuses.every((status) => status === "Completed" || status === "N/A");
   const progress = stageProgress(statuses);
 
-  const saveStage = async (stageNumber: number, status: StageStatus) => {
+  const updateStageDraft = (index: number, patch: Partial<StageDetail>) => {
+    setStageDrafts((current) =>
+      current.map((detail, detailIndex) =>
+        detailIndex === index ? { ...detail, ...patch } : detail,
+      ),
+    );
+  };
+
+  const unlockCompletedStage = (index: number) => {
+    setEditingCompletedStages((current) => new Set(current).add(index));
+    showToast("Completed stage unlocked. Edit it, then click Save complete.");
+  };
+
+  const saveStage = async (stageNumber: number, status: StageStatus, advance = true) => {
     if (status !== "Completed") {
       showToast("Please manually choose Completed before saving this step.");
       return;
     }
 
-    const nextStatuses = advanceStageStatuses(statuses, stageNumber - 1);
+    const completedIndex = stageNumber - 1;
+    const completionDate = stageDrafts[completedIndex].actualCompletionDate || new Date().toISOString().slice(0, 10);
+    const stageDetails = {
+      ...stageDrafts[completedIndex],
+      actualCompletionDate: completionDate,
+    };
+    const nextStageDrafts = stageDrafts.map((detail, index) =>
+      index === completedIndex ? stageDetails : detail,
+    );
+    const nextStatuses = advance
+      ? advanceStageStatuses(statuses, completedIndex)
+      : statuses.map((stageStatus, index) => index === completedIndex ? "Completed" : stageStatus);
     const nextIndex = nextStatuses.findIndex((nextStatus) => nextStatus === "In Progress");
     const nextProgress = stageProgress(nextStatuses);
     const nextStageName = nextIndex >= 0 ? stages[nextIndex][0] : "All stages completed";
 
     setStatuses(nextStatuses);
-    setExpanded(nextIndex >= 0 ? nextIndex : -1);
+    setStageDrafts(nextStageDrafts);
+    setSavedCompletedStages((current) => new Set(current).add(completedIndex));
+    setEditingCompletedStages((current) => {
+      const next = new Set(current);
+      next.delete(completedIndex);
+      return next;
+    });
+    setExpanded(advance ? (nextIndex >= 0 ? nextIndex : -1) : completedIndex);
     onUpdate({
       progress: nextProgress.percentage,
-      step: nextIndex >= 0 ? nextIndex + 1 : stageNumber,
-      stage: nextStageName,
+      step: advance ? (nextIndex >= 0 ? nextIndex + 1 : stageNumber) : project.step,
+      stage: advance ? nextStageName : project.stage,
       stageStatuses: nextStatuses.map((nextStatus, index) => ({
         stageNumber: index + 1,
         status: nextStatus === "In Progress" ? "in_progress" : nextStatus === "Completed" ? "completed" : nextStatus === "N/A" ? "not_applicable" : "not_started",
       })),
+      stageDetails: nextStageDrafts,
     });
 
     if (!isPersistedId(project.id)) {
-      showToast(nextIndex >= 0 ? `Step ${nextIndex + 1} is now In Progress` : "All steps completed. You can close the project.");
+      showToast(advance && nextIndex >= 0 ? `Step ${nextIndex + 1} is now In Progress` : "Stage details saved.");
       return;
     }
 
@@ -1427,9 +1510,11 @@ function ProjectDetail({
         projectId: project.id,
         stageNumber,
         status,
+        advance,
+        details: stageDetails,
       });
       if (result.project) onUpdate(result.project);
-      showToast(nextIndex >= 0 ? `Step ${nextIndex + 1} is now In Progress` : "All steps completed. You can close the project.");
+      showToast(advance && nextIndex >= 0 ? `Step ${nextIndex + 1} is now In Progress` : "Stage details saved to Supabase.");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Stage sync failed");
     }
@@ -1528,9 +1613,21 @@ function ProjectDetail({
           const open = expanded === index;
           const status = statuses[index];
           const stageNumber = index + 1;
-          const canTouch = index === currentStageIndex;
+          const isSavedCompleted = savedCompletedStages.has(index) && status === "Completed";
+          const isEditingCompleted = editingCompletedStages.has(index);
+          const isPendingCompletion = status === "Completed" && !isSavedCompleted;
+          const canTouch = isSavedCompleted || isPendingCompletion || index === currentStageIndex;
+          const isReadOnlyCompleted = isSavedCompleted && !isEditingCompleted;
+          const canEditStageFields = !isReadOnlyCompleted;
           const statusClassName = stageStatusClassName(status);
           const displayStatus = status === "Not Started" ? "Locked" : status;
+          const stageDraft = stageDrafts[index];
+          const stageButtonLabel = isReadOnlyCompleted
+            ? "Cancel completed"
+            : isEditingCompleted
+              ? "Save complete"
+              : "Save completed stage";
+          const stageButtonDisabled = !isEditingCompleted && !isReadOnlyCompleted && status !== "Completed";
 
           return (
             <article className={`stage-card ${open ? "expanded" : ""} ${canTouch ? "current" : "locked"} ${statusClassName}`} key={name}>
@@ -1558,6 +1655,7 @@ function ProjectDetail({
                       Stage Status
                       <select
                         value={status}
+                        disabled={isSavedCompleted}
                         onChange={(event) =>
                           setStatuses((current) =>
                             current.map((value, itemIndex) =>
@@ -1572,19 +1670,39 @@ function ProjectDetail({
                     </label>
                     <label>
                       Expected Date
-                      <input type="date" />
+                      <input
+                        type="date"
+                        value={stageDraft.expectedDate}
+                        disabled={!canEditStageFields}
+                        onChange={(event) => updateStageDraft(index, { expectedDate: event.target.value })}
+                      />
                     </label>
                     <label>
                       Actual Completion Date
-                      <input type="date" />
+                      <input
+                        type="date"
+                        value={stageDraft.actualCompletionDate}
+                        disabled={!canEditStageFields}
+                        onChange={(event) => updateStageDraft(index, { actualCompletionDate: event.target.value })}
+                      />
                     </label>
                     <label>
                       {index === 0 ? "DC Clearance Status" : "Approval Reference"}
-                      <input defaultValue={index === 0 ? "Received already" : ""} />
+                      <input
+                        value={stageDraft.approvalReference}
+                        disabled={!canEditStageFields}
+                        placeholder={index === 0 ? "Received already" : "Approval reference"}
+                        onChange={(event) => updateStageDraft(index, { approvalReference: event.target.value })}
+                      />
                     </label>
                     <label className="span-2">
                       Site Notes
-                      <textarea placeholder="Add site notes, approval follow-up or work observations…" />
+                      <textarea
+                        value={stageDraft.notes}
+                        disabled={!canEditStageFields}
+                        placeholder="Add site notes, approval follow-up or work observations..."
+                        onChange={(event) => updateStageDraft(index, { notes: event.target.value })}
+                      />
                     </label>
                   </div>
 
@@ -1604,16 +1722,26 @@ function ProjectDetail({
                         event.currentTarget.value = "";
                       }}
                     />
-                    <button type="button" className="secondary-button" onClick={() => uploadRef.current?.click()}>
+                    <button type="button" className="secondary-button" disabled={!canEditStageFields} onClick={() => uploadRef.current?.click()}>
                       <Plus size={15} /> Upload files / photos
                     </button>
                   </div>
 
                   <p className="empty-file">No files uploaded for this step yet.</p>
                   <p className="last-updated">Last updated 08 Aug 2026 by qingyuc832@gmail.com</p>
-                  <p className="stage-rule-note">Manual control: select Completed first, then save. The next step will open automatically.</p>
-                  <button className="primary-button stage-save" disabled={status !== "Completed"} onClick={() => saveStage(stageNumber, status)}>
-                    Save completed stage
+                  <p className="stage-rule-note">{isReadOnlyCompleted ? "This stage is completed. Click Cancel completed to edit its details." : "Manual control: save as complete when this stage's details are correct."}</p>
+                  <button
+                    className={isReadOnlyCompleted ? "secondary-button stage-save" : "primary-button stage-save"}
+                    disabled={stageButtonDisabled}
+                    onClick={() => {
+                      if (isReadOnlyCompleted) {
+                        unlockCompletedStage(index);
+                        return;
+                      }
+                      saveStage(stageNumber, "Completed", !isEditingCompleted);
+                    }}
+                  >
+                    {stageButtonLabel}
                   </button>
                 </div>
               )}

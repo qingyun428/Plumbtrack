@@ -33,6 +33,15 @@ type Project = {
   active: boolean;
   createdAt?: string;
   stageStatuses?: { stageNumber: number; status: string }[];
+  stageDetails?: StageDetail[];
+};
+
+type StageDetail = {
+  stageNumber: number;
+  expectedDate: string;
+  actualCompletionDate: string;
+  approvalReference: string;
+  notes: string;
 };
 
 type RecordItem = {
@@ -114,6 +123,10 @@ type DbStageRow = {
   stage_number: number;
   name: string;
   status: string;
+  expected_date?: string | null;
+  actual_completion_date?: string | null;
+  notes?: string | null;
+  stage_field_values?: { field_key: string; field_value: string | null }[] | null;
 };
 
 type DbRecordRow = {
@@ -176,6 +189,8 @@ type JsonPayload = {
   projectId?: string | number;
   stageNumber?: number;
   status?: string;
+  advance?: boolean;
+  details?: StageDetail;
   patch?: Partial<Project>;
   record?: RecordItem;
   reminder?: ReminderItem;
@@ -204,7 +219,7 @@ const stageTemplates = [
 ] as const;
 
 const projectSelect =
-  "id,name,reference,description,site_address,maincon,person_in_charge,start_date,target_completion_date,status,progress,created_at,project_stages(id,stage_number,name,status),records(id)";
+  "id,name,reference,description,site_address,maincon,person_in_charge,start_date,target_completion_date,status,progress,created_at,project_stages(id,stage_number,name,status,expected_date,actual_completion_date,notes,stage_field_values(field_key,field_value)),records(id)";
 
 const recordSelect =
   "id,project_id,stage_id,storage_path,file_name,mime_type,size_bytes,category,revision,created_at,projects(name),project_stages(stage_number,name),profiles(email,full_name)";
@@ -323,6 +338,14 @@ function toProject(row: DbProjectRow): Project {
     stageStatuses: orderedStages.map((stage) => ({
       stageNumber: stage.stage_number,
       status: stage.status,
+    })),
+    stageDetails: orderedStages.map((stage) => ({
+      stageNumber: stage.stage_number,
+      expectedDate: stage.expected_date ?? "",
+      actualCompletionDate: stage.actual_completion_date ?? "",
+      approvalReference:
+        stage.stage_field_values?.find((field) => field.field_key === "approval_reference")?.field_value ?? "",
+      notes: stage.notes ?? "",
     })),
   };
 }
@@ -632,11 +655,16 @@ export async function POST(request: Request) {
     if (toDbStageStatus(payload.status) !== "completed") {
       return errorResponse("Select Completed before saving this stage.");
     }
+    const shouldAdvance = payload.advance !== false;
+    const stageDetails = payload.details;
+    const completionDate = stageDetails?.actualCompletionDate || new Date().toISOString().slice(0, 10);
     const { data: stage, error } = await supabase
       .from("project_stages")
       .update({
         status: "completed",
-        actual_completion_date: new Date().toISOString().slice(0, 10),
+        expected_date: stageDetails?.expectedDate || null,
+        actual_completion_date: completionDate,
+        notes: stageDetails?.notes || null,
       })
       .eq("project_id", payload.projectId)
       .eq("stage_number", payload.stageNumber)
@@ -645,32 +673,46 @@ export async function POST(request: Request) {
     if (error) return errorResponse(error.message);
 
     const stageRow = stage as { id: string; name: string; stage_number: number };
-    const { error: resetFutureError } = await supabase
-      .from("project_stages")
-      .update({ status: "not_started" })
-      .eq("project_id", payload.projectId)
-      .eq("applicable", true)
-      .gt("stage_number", stageRow.stage_number)
-      .neq("status", "completed");
-    if (resetFutureError) return errorResponse(resetFutureError.message);
+    if (stageDetails) {
+      const { error: fieldError } = await supabase.from("stage_field_values").upsert(
+        {
+          stage_id: stageRow.id,
+          field_key: "approval_reference",
+          field_value: stageDetails.approvalReference || null,
+        },
+        { onConflict: "stage_id,field_key" },
+      );
+      if (fieldError) return errorResponse(fieldError.message);
+    }
 
-    const { data: nextStage } = await supabase
-      .from("project_stages")
-      .select("id,stage_number,name")
-      .eq("project_id", payload.projectId)
-      .eq("applicable", true)
-      .gt("stage_number", stageRow.stage_number)
-      .neq("status", "completed")
-      .order("stage_number", { ascending: true })
-      .limit(1)
-      .maybeSingle();
-
-    if (nextStage) {
-      const { error: nextStageError } = await supabase
+    if (shouldAdvance) {
+      const { error: resetFutureError } = await supabase
         .from("project_stages")
-        .update({ status: "in_progress" })
-        .eq("id", (nextStage as { id: string }).id);
-      if (nextStageError) return errorResponse(nextStageError.message);
+        .update({ status: "not_started" })
+        .eq("project_id", payload.projectId)
+        .eq("applicable", true)
+        .gt("stage_number", stageRow.stage_number)
+        .neq("status", "completed");
+      if (resetFutureError) return errorResponse(resetFutureError.message);
+
+      const { data: nextStage } = await supabase
+        .from("project_stages")
+        .select("id,stage_number,name")
+        .eq("project_id", payload.projectId)
+        .eq("applicable", true)
+        .gt("stage_number", stageRow.stage_number)
+        .neq("status", "completed")
+        .order("stage_number", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
+      if (nextStage) {
+        const { error: nextStageError } = await supabase
+          .from("project_stages")
+          .update({ status: "in_progress" })
+          .eq("id", (nextStage as { id: string }).id);
+        if (nextStageError) return errorResponse(nextStageError.message);
+      }
     }
 
     const { data: allStages, error: countError } = await supabase
