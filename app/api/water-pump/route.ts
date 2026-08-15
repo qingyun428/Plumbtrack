@@ -84,7 +84,8 @@ type DbProject = {
 type ApiPayload =
   | { action: "saveProject"; project: WaterPumpProject }
   | { action: "saveOption"; option: WaterPumpOption }
-  | { action: "toggleOption"; code: string; active: boolean };
+  | { action: "toggleOption"; code: string; active: boolean }
+  | { action: "deleteOption"; code: string };
 
 const projectSelect = `
   *,
@@ -275,6 +276,17 @@ export async function POST(request: Request) {
 
     if (error) return NextResponse.json({ connected: true, error: error.message }, { status: 400 });
     return NextResponse.json({ connected: true });
+  }
+
+  if (payload.action === "deleteOption") {
+    const { error } = await supabase
+      .from("water_pump_options")
+      .delete()
+      .eq("code", payload.code)
+      .eq("is_default", false);
+
+    if (error) return NextResponse.json({ connected: true, error: error.message }, { status: 400 });
+    return NextResponse.json({ connected: true, deleted: payload.code });
   }
 
   const project = payload.project;

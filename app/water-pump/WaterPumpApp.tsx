@@ -47,6 +47,7 @@ type WaterPumpApiResponse = {
   projects?: WaterPumpProject[];
   project?: WaterPumpProject;
   option?: WaterPumpOption;
+  deleted?: string;
   error?: string;
 };
 
@@ -91,6 +92,10 @@ function statusClass(status: string) {
 }
 
 export default function WaterPumpApp() {
+  const mainAppUrl =
+    process.env.NEXT_PUBLIC_MAIN_APP_URL?.trim() ||
+    process.env.NEXT_PUBLIC_SITE_URL?.trim() ||
+    "/";
   const [view, setView] = useState<PumpView>("dashboard");
   const [projects, setProjects] = useState<WaterPumpProject[]>(waterPumpProjectsSeed);
   const [options, setOptions] = useState<WaterPumpOption[]>(pumpOptionsSeed);
@@ -269,6 +274,10 @@ export default function WaterPumpApp() {
   };
 
   const deleteProject = async (project: WaterPumpProject) => {
+    if (!window.confirm(`Delete ${project.name || "this Water Pump project"}? This will remove all pump details and quotations from Supabase.`)) {
+      return;
+    }
+
     const nextProjects = projects.filter((item) => item.id !== project.id);
     setProjects(nextProjects);
     setSelectedProjectId(nextProjects[0]?.id ?? "");
@@ -322,6 +331,33 @@ export default function WaterPumpApp() {
     }
   };
 
+  const deleteOption = async (option: WaterPumpOption) => {
+    if (option.isDefault) {
+      showToast("System default pump options cannot be deleted");
+      return;
+    }
+    if (!window.confirm(`Delete custom pump option ${option.name}? Projects using it may block the delete.`)) {
+      return;
+    }
+
+    const previousOptions = options;
+    setOptions((current) => current.filter((item) => item.code !== option.code));
+
+    try {
+      const response = await fetch("/api/water-pump", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "deleteOption", code: option.code }),
+      });
+      const payload = (await response.json()) as WaterPumpApiResponse;
+      if (!response.ok || payload.error) throw new Error(payload.error ?? "Option delete failed");
+      showToast("Pump option deleted");
+    } catch (error) {
+      setOptions(previousOptions);
+      showToast(error instanceof Error ? error.message : "Pump option delete failed");
+    }
+  };
+
   const header = viewTitles[view];
 
   return (
@@ -334,6 +370,11 @@ export default function WaterPumpApp() {
             <span>WATER &amp; PUMP CONTROL</span>
           </div>
         </div>
+
+        <button className="wp-back-main" onClick={() => window.location.assign(mainAppUrl)}>
+          <ArrowLeft size={16} />
+          Back to PlumbTrack
+        </button>
 
         <nav className="wp-nav" aria-label="Pump Tracker navigation">
           {navItems.map((item) => {
@@ -425,7 +466,7 @@ export default function WaterPumpApp() {
         ) : view === "suppliers" ? (
           <SuppliersView suppliers={suppliers} />
         ) : view === "options" ? (
-          <PumpOptionsView options={options} onSave={saveOption} onToggle={toggleOption} />
+          <PumpOptionsView options={options} onSave={saveOption} onToggle={toggleOption} onDelete={deleteOption} />
         ) : (
           <section className="wp-empty">
             <Droplets size={28} />
@@ -853,6 +894,7 @@ function ProjectEditView({
     setDraft((current) => {
       const exists = current.pumps.some((pump) => pump.optionCode === option.code);
       if (exists) {
+        if (!window.confirm(`Remove ${option.name} from this project?`)) return current;
         return {
           ...current,
           pumps: current.pumps.filter((pump) => pump.optionCode !== option.code),
@@ -878,12 +920,32 @@ function ProjectEditView({
     });
   };
 
+  const deletePump = (id: string, name: string) => {
+    if (!window.confirm(`Remove ${name} from this project?`)) return;
+    setDraft((current) => ({
+      ...current,
+      pumps: current.pumps.filter((pump) => pump.id !== id),
+    }));
+  };
+
   const updateQuotation = (id: string, patch: Partial<WaterPumpQuotation>) => {
     setDraft((current) => ({
       ...current,
       quotations: current.quotations.map((quotation) =>
         quotation.id === id ? { ...quotation, ...patch } : quotation,
       ),
+    }));
+  };
+
+  const deleteQuotation = (id: string, supplierName: string) => {
+    if (!window.confirm(`Delete quotation ${supplierName || "this supplier"}?`)) return;
+    setDraft((current) => ({
+      ...current,
+      selectedSupplierName:
+        current.quotations.find((quotation) => quotation.id === id)?.selected
+          ? "Not selected"
+          : current.selectedSupplierName,
+      quotations: current.quotations.filter((quotation) => quotation.id !== id),
     }));
   };
 
@@ -1014,6 +1076,9 @@ function ProjectEditView({
         <div className="wp-selected-pumps">
           {draft.pumps.map((pump) => (
             <article key={pump.id}>
+              <button type="button" className="wp-mini-danger wp-card-delete" onClick={() => deletePump(pump.id, pump.optionName)}>
+                <Trash2 size={14} /> Remove
+              </button>
               <h3>
                 {pump.optionCode} · {pump.optionName}
               </h3>
@@ -1127,6 +1192,9 @@ function ProjectEditView({
         <div className="wp-quote-forms">
           {draft.quotations.map((quotation) => (
             <article key={quotation.id}>
+              <button type="button" className="wp-mini-danger wp-card-delete" onClick={() => deleteQuotation(quotation.id, quotation.supplierName)}>
+                <Trash2 size={14} /> Delete quotation
+              </button>
               <label className="wp-select-supplier">
                 <input
                   type="radio"
@@ -1299,10 +1367,12 @@ function PumpOptionsView({
   options,
   onSave,
   onToggle,
+  onDelete,
 }: {
   options: WaterPumpOption[];
   onSave: (option: WaterPumpOption) => void;
   onToggle: (code: string, active: boolean) => void;
+  onDelete: (option: WaterPumpOption) => void;
 }) {
   const [newName, setNewName] = useState("");
 
@@ -1360,6 +1430,15 @@ function PumpOptionsView({
               onClick={() => onToggle(option.code, !option.active)}
             >
               <i />
+            </button>
+            <button
+              className="wp-option-delete"
+              type="button"
+              disabled={option.isDefault}
+              aria-label={`Delete ${option.name}`}
+              onClick={() => onDelete(option)}
+            >
+              <Trash2 size={15} />
             </button>
           </article>
         ))}

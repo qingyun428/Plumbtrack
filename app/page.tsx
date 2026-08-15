@@ -65,15 +65,60 @@ type Project = {
 };
 
 type RecordItem = {
-  id: number;
+  id: string | number;
   name: string;
   size: string;
   project: string;
+  projectId?: string;
   stage: string;
+  stageId?: string | null;
+  stageNumber?: number;
   category: string;
   revision: string;
   date: string;
   uploader: string;
+  storagePath?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  file?: File;
+};
+
+type ReminderItem = {
+  id: string | number;
+  title: string;
+  project: string;
+  projectId?: string;
+  stage: string;
+  stageId?: string | null;
+  dueDate: string;
+  status: "Normal" | "Due Soon" | "Overdue" | "Completed";
+  completed: boolean;
+};
+
+type TeamMember = {
+  id: string | number;
+  name: string;
+  email: string;
+  role: "Administrator" | "View Only" | string;
+  active: boolean;
+  lastSeen: string;
+};
+
+type ActivityItem = {
+  id: string | number;
+  action: string;
+  detail: string;
+  date: string;
+  type: "refresh" | "plus" | "upload" | "delete" | "settings";
+  actor: string;
+};
+
+type SettingsState = {
+  companyName: string;
+  fileUploadLimitMb: number;
+  dateFormat: string;
+  followUpDays: number;
+  dataRetention: string;
 };
 
 type StageStatus =
@@ -323,6 +368,57 @@ const activitySeed = [
   ["Created project", "18A BERRIMA ROAD · 18A BERRIMA ROAD", "26 Jul 2026", "plus"],
 ] as const;
 
+const reminderSeed: ReminderItem[] = [
+  {
+    id: "local-reminder-1",
+    title: "DP & DC Clearance",
+    project: "754 MOUNTBATTEN ROAD",
+    stage: "Step 1 · DP & DC Clearance",
+    dueDate: "2026-03-05",
+    status: "Completed",
+    completed: true,
+  },
+  {
+    id: "local-reminder-2",
+    title: "Temporary Water Submission",
+    project: "754 MOUNTBATTEN ROAD",
+    stage: "Step 2 · Temporary Water Submission",
+    dueDate: "2026-07-09",
+    status: "Overdue",
+    completed: false,
+  },
+];
+
+const teamSeed: TeamMember[] = [
+  {
+    id: "local-team-1",
+    name: "Chen QingYu",
+    email: "qingyuc832@gmail.com",
+    role: "Administrator",
+    active: true,
+    lastSeen: "08 Aug 2026",
+  },
+];
+
+const activityItemsSeed: ActivityItem[] = activitySeed.map(
+  ([action, detail, date, type], index) => ({
+    id: `local-activity-${index}`,
+    action,
+    detail,
+    date,
+    type: type as ActivityItem["type"],
+    actor: "qingyuc832@gmail.com",
+  }),
+);
+
+const settingsSeed: SettingsState = {
+  companyName: "PlumbTrack Contractor",
+  fileUploadLimitMb: 25,
+  dateFormat: "DD/MM/YYYY",
+  followUpDays: 7,
+  dataRetention: "Permanent",
+};
+
 const projectSchema = z.object({
   name: z.string().min(3, "Project name is required"),
   reference: z.string().min(3, "Reference is required"),
@@ -339,6 +435,73 @@ type ProjectForm = z.infer<typeof projectSchema>;
 
 const supabaseProjectSelect =
   "id,name,reference,description,site_address,maincon,person_in_charge,start_date,target_completion_date,status,progress,created_at,project_stages(stage_number,name,status),records(id)";
+
+type PlumbtrackApiResponse = {
+  connected?: boolean;
+  message?: string;
+  projects?: Project[];
+  records?: RecordItem[];
+  reminders?: ReminderItem[];
+  teamMembers?: TeamMember[];
+  activities?: ActivityItem[];
+  settings?: SettingsState;
+  project?: Project;
+  record?: RecordItem;
+  reminder?: ReminderItem;
+  teamMember?: TeamMember;
+  error?: string;
+};
+
+type RecordUploadPayload = {
+  record: RecordItem;
+};
+
+function isPersistedId(id: string | number | undefined | null) {
+  return typeof id === "string" && !id.startsWith("local-");
+}
+
+async function plumbtrackApi(action: string, payload: Record<string, unknown> = {}) {
+  const response = await fetch("/api/plumbtrack", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, ...payload }),
+  });
+  const result = (await response.json()) as PlumbtrackApiResponse;
+  if (!response.ok || result.error) throw new Error(result.error ?? "Supabase sync failed");
+  return result;
+}
+
+async function uploadRecordFile({ record }: RecordUploadPayload) {
+  if (!record.file || !record.projectId) return plumbtrackApi("saveRecord", { record });
+
+  const form = new FormData();
+  form.append("action", "uploadRecordFile");
+  form.append("file", record.file);
+  form.append("record", JSON.stringify({ ...record, file: undefined }));
+  form.append("projectId", record.projectId);
+  if (record.stageId) form.append("stageId", record.stageId);
+  if (record.stageNumber) form.append("stageNumber", String(record.stageNumber));
+
+  const response = await fetch("/api/plumbtrack", {
+    method: "POST",
+    body: form,
+  });
+  const result = (await response.json()) as PlumbtrackApiResponse;
+  if (!response.ok || result.error) throw new Error(result.error ?? "Supabase file upload failed");
+  return result;
+}
+
+function reminderStatus(dueDate: string, completed: boolean): ReminderItem["status"] {
+  if (completed) return "Completed";
+  const due = new Date(`${dueDate}T00:00:00`).getTime();
+  if (Number.isNaN(due)) return "Normal";
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.ceil((due - today.getTime()) / 86400000);
+  if (days < 0) return "Overdue";
+  if (days <= 7) return "Due Soon";
+  return "Normal";
+}
 
 function projectCode(name: string) {
   const digits = name.replace(/\D/g, "").slice(0, 2);
@@ -472,6 +635,10 @@ export default function HomePage() {
   const [view, setView] = useState<View>("dashboard");
   const [projects, setProjects] = useState(projectsSeed);
   const [records, setRecords] = useState(recordSeed);
+  const [reminders, setReminders] = useState(reminderSeed);
+  const [teamMembers, setTeamMembers] = useState(teamSeed);
+  const [activities, setActivities] = useState(activityItemsSeed);
+  const [settings, setSettings] = useState(settingsSeed);
   const [selectedId, setSelectedId] = useState<Project["id"]>(projectsSeed[0].id);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [toast, setToast] = useState("");
@@ -492,11 +659,44 @@ export default function HomePage() {
   const [sessionEmail, setSessionEmail] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const serviceSyncConnected = useRef(false);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(""), 2600);
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    fetch("/api/plumbtrack", { cache: "no-store" })
+      .then((response) => response.json() as Promise<PlumbtrackApiResponse>)
+      .then((payload) => {
+        if (!mounted) return;
+        if (payload.projects?.length) {
+          setProjects(payload.projects);
+          setSelectedId(payload.projects[0].id);
+        }
+        if (payload.records) setRecords(payload.records);
+        if (payload.reminders) setReminders(payload.reminders);
+        if (payload.teamMembers) setTeamMembers(payload.teamMembers);
+        if (payload.activities) setActivities(payload.activities);
+        if (payload.settings) setSettings(payload.settings);
+        if (payload.connected) {
+          serviceSyncConnected.current = true;
+          setConnection("connected");
+          setConnectionDetail(payload.message ?? "Supabase service sync connected.");
+          setSessionEmail("server sync");
+        }
+      })
+      .catch((error: unknown) => {
+        console.warn("PlumbTrack service sync unavailable", error);
+      });
+
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const loadSupabaseProjects = useCallback(async (email?: string | null) => {
@@ -533,6 +733,7 @@ export default function HomePage() {
       const email = data.session?.user.email ?? null;
       setSessionEmail(email);
       if (!data.session) {
+        if (serviceSyncConnected.current) return;
         setConnection("signed-out");
         setConnectionDetail("Supabase variables found. Sign in with your Supabase Auth email/password to load projects.");
         return;
@@ -553,6 +754,7 @@ export default function HomePage() {
         if (!mounted) return;
         setSessionEmail(session?.user.email ?? null);
         if (!session) {
+          if (serviceSyncConnected.current) return;
           setConnection("signed-out");
           setConnectionDetail("Supabase variables found. Sign in with your Supabase Auth email/password to load projects.");
           setProjects(projectsSeed);
@@ -633,6 +835,22 @@ export default function HomePage() {
     setProjects((current) => [fallback, ...current]);
     setSelectedId(fallback.id);
     navigate("detail");
+
+    try {
+      const result = await plumbtrackApi("createProject", { data });
+      if (result.project) {
+        setProjects((current) =>
+          current.map((project) =>
+            String(project.id) === String(fallback.id) ? result.project! : project,
+          ),
+        );
+        setSelectedId(result.project.id);
+        showToast(result.connected ? "Project saved to Supabase" : "Project saved locally");
+        return;
+      }
+    } catch (error) {
+      console.warn("Service project save failed, trying browser Supabase", error);
+    }
 
     const supabase = getSupabaseBrowserClient();
     if (!supabase || connection !== "connected") {
@@ -720,19 +938,152 @@ export default function HomePage() {
       ),
     );
 
-    const supabase = getSupabaseBrowserClient();
-    if (!supabase || connection !== "connected" || String(id).startsWith("local-")) {
-      return;
-    }
-
     const dbPatch: Record<string, string | number> = {};
     if (patch.progress !== undefined) dbPatch.progress = patch.progress;
     if (patch.active !== undefined) dbPatch.status = patch.active ? "active" : "completed";
     if (Object.keys(dbPatch).length === 0) return;
 
+    try {
+      await plumbtrackApi("updateProject", { id, patch });
+      return;
+    } catch (error) {
+      console.warn("Service project update failed, trying browser Supabase", error);
+    }
+
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase || connection !== "connected" || String(id).startsWith("local-")) {
+      return;
+    }
+
     const { error } = await supabase.from("projects").update(dbPatch).eq("id", id);
     if (error) showToast(`Supabase update failed: ${error.message}`);
   }, [connection, showToast]);
+
+  const deleteProject = useCallback(async (project: Project) => {
+    if (!window.confirm(`Delete ${project.name}? This will also remove its stages, records and reminders from Supabase.`)) {
+      return;
+    }
+
+    setProjects((current) => current.filter((item) => String(item.id) !== String(project.id)));
+    setSelectedId((current) => {
+      if (String(current) !== String(project.id)) return current;
+      return projects.find((item) => String(item.id) !== String(project.id))?.id ?? "";
+    });
+    navigate("projects");
+
+    try {
+      await plumbtrackApi("deleteProject", { id: project.id, name: project.name });
+      showToast("Project deleted from Supabase");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Project removed locally");
+    }
+  }, [navigate, projects, showToast]);
+
+  const saveRecord = useCallback(async (record: RecordItem) => {
+    const recordForState = { ...record, file: undefined };
+    setRecords((current) => [recordForState, ...current]);
+    try {
+      const result = record.file
+        ? await uploadRecordFile({ record })
+        : await plumbtrackApi("saveRecord", { record });
+      if (result.record) {
+        setRecords((current) =>
+          current.map((item) => (String(item.id) === String(record.id) ? result.record! : item)),
+        );
+      }
+      showToast(result.connected ? "Record and file saved to Supabase" : "Record added locally");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Record added locally");
+    }
+  }, [showToast]);
+
+  const deleteRecord = useCallback(async (record: RecordItem) => {
+    setRecords((current) => current.filter((item) => String(item.id) !== String(record.id)));
+    try {
+      await plumbtrackApi("deleteRecord", { id: record.id, name: record.name });
+      showToast("Record deleted from Supabase");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Record removed locally");
+    }
+  }, [showToast]);
+
+  const saveReminder = useCallback(async (reminder: ReminderItem) => {
+    setReminders((current) => [reminder, ...current]);
+    try {
+      const result = await plumbtrackApi("saveReminder", { reminder });
+      if (result.reminder) {
+        setReminders((current) =>
+          current.map((item) => (String(item.id) === String(reminder.id) ? result.reminder! : item)),
+        );
+      }
+      showToast(result.connected ? "Reminder saved to Supabase" : "Reminder added locally");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Reminder added locally");
+    }
+  }, [showToast]);
+
+  const deleteReminder = useCallback(async (reminder: ReminderItem) => {
+    setReminders((current) => current.filter((item) => String(item.id) !== String(reminder.id)));
+    try {
+      await plumbtrackApi("deleteReminder", { id: reminder.id, title: reminder.title });
+      showToast("Reminder deleted from Supabase");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Reminder removed locally");
+    }
+  }, [showToast]);
+
+  const toggleReminder = useCallback(async (reminder: ReminderItem) => {
+    const completed = !reminder.completed;
+    const nextReminder = {
+      ...reminder,
+      completed,
+      status: reminderStatus(reminder.dueDate, completed),
+    };
+    setReminders((current) =>
+      current.map((item) => (String(item.id) === String(reminder.id) ? nextReminder : item)),
+    );
+    try {
+      await plumbtrackApi("saveReminder", { reminder: nextReminder });
+      showToast("Reminder status saved");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Reminder status updated locally");
+    }
+  }, [showToast]);
+
+  const saveTeamMember = useCallback(async (member: TeamMember) => {
+    setTeamMembers((current) => [member, ...current]);
+    try {
+      const result = await plumbtrackApi("saveTeamMember", { member });
+      if (result.teamMember) {
+        setTeamMembers((current) =>
+          current.map((item) => (String(item.id) === String(member.id) ? result.teamMember! : item)),
+        );
+      }
+      showToast(result.connected ? "Employee saved to Supabase" : "Employee added locally");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Employee added locally");
+    }
+  }, [showToast]);
+
+  const deleteTeamMember = useCallback(async (member: TeamMember) => {
+    setTeamMembers((current) => current.filter((item) => String(item.id) !== String(member.id)));
+    try {
+      await plumbtrackApi("deleteTeamMember", { id: member.id, email: member.email });
+      showToast("Employee deleted from Supabase");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Employee removed locally");
+    }
+  }, [showToast]);
+
+  const saveSettings = useCallback(async (nextSettings: SettingsState) => {
+    setSettings(nextSettings);
+    try {
+      await plumbtrackApi("saveSettings", { settings: nextSettings });
+      showToast("Settings saved to Supabase");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Settings saved locally");
+    }
+  }, [showToast]);
 
   return (
     <div className="app-shell">
@@ -771,12 +1122,12 @@ export default function HomePage() {
         <SupabaseConnectionPanel connection={connection} detail={connectionDetail} email={sessionEmail} loading={authLoading} onSignIn={signInToSupabase} onSignOut={signOutFromSupabase} />
         {view === "dashboard" && <Dashboard projects={projects} onOpen={openProject} onAdd={() => navigate("new-project")} />}
         {view === "projects" && <Projects projects={projects} onOpen={openProject} onAdd={() => navigate("new-project")} />}
-        {view === "records" && <Records records={records} setRecords={setRecords} projects={projects} showToast={showToast} />}
-        {view === "calendar" && <CalendarPage onOpen={() => projects[0] ? openProject(projects[0].id) : navigate("projects")} />}
-        {view === "team" && <TeamPage showToast={showToast} />}
-        {view === "activity" && <ActivityPage />}
-        {view === "settings" && <SettingsPage showToast={showToast} />}
-        {view === "detail" && selectedProject && <ProjectDetail project={selectedProject} onBack={() => navigate("projects")} onUpdate={(patch) => updateProject(selectedProject.id, patch)} onUpload={(record) => setRecords((current) => [record, ...current])} showToast={showToast} />}
+        {view === "records" && <Records records={records} projects={projects} onDelete={deleteRecord} showToast={showToast} />}
+        {view === "calendar" && <CalendarPage reminders={reminders} projects={projects} onOpen={() => projects[0] ? openProject(projects[0].id) : navigate("projects")} onCreate={saveReminder} onDelete={deleteReminder} onToggle={toggleReminder} />}
+        {view === "team" && <TeamPage members={teamMembers} onCreate={saveTeamMember} onDelete={deleteTeamMember} />}
+        {view === "activity" && <ActivityPage activities={activities} />}
+        {view === "settings" && <SettingsPage key={JSON.stringify(settings)} settings={settings} onSave={saveSettings} />}
+        {view === "detail" && selectedProject && <ProjectDetail project={selectedProject} onBack={() => navigate("projects")} onUpdate={(patch) => updateProject(selectedProject.id, patch)} onDelete={() => deleteProject(selectedProject)} onUpload={saveRecord} showToast={showToast} />}
         {view === "detail" && !selectedProject && <div className="page"><div className="panel standalone"><EmptyState title="No project selected." /></div></div>}
         {view === "new-project" && <NewProjectPage onCancel={() => navigate("projects")} onCreate={createProject} />}
       </main>
@@ -858,13 +1209,13 @@ function Projects({ projects, onOpen, onAdd }: { projects: Project[]; onOpen: (i
   );
 }
 
-function Records({ records, setRecords, projects, showToast }: { records: RecordItem[]; setRecords: React.Dispatch<React.SetStateAction<RecordItem[]>>; projects: Project[]; showToast: (message: string) => void }) {
+function Records({ records, projects, onDelete, showToast }: { records: RecordItem[]; projects: Project[]; onDelete: (record: RecordItem) => void; showToast: (message: string) => void }) {
   const [search, setSearch] = useState("");
   const [project, setProject] = useState("all");
   const [category, setCategory] = useState("all");
   const [preview, setPreview] = useState<RecordItem | null>(null);
   const visible = records.filter((r) => r.name.toLowerCase().includes(search.toLowerCase()) && (project === "all" || r.project === project) && (category === "all" || r.category === category));
-  const remove = (record: RecordItem) => { if (window.confirm(`Delete ${record.name}?`)) { setRecords((current) => current.filter((item) => item.id !== record.id)); showToast("Record deleted"); } };
+  const remove = (record: RecordItem) => { if (window.confirm(`Delete ${record.name}? This will remove the record from Supabase when connected.`)) onDelete(record); };
   const download = (record: RecordItem) => { const blob = new Blob([`PlumbTrack mock record\n${record.name}\n${record.project}\n${record.stage}`], { type: "text/plain" }); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `${record.name}.txt`; anchor.click(); URL.revokeObjectURL(url); showToast("Mock download started"); };
   return (
     <div className="page"><header className="page-header"><div><Eyebrow>DOCUMENT CONTROL</Eyebrow><h1>Records</h1><p>Search, preview and download every project file from one place.</p></div></header>
@@ -876,31 +1227,350 @@ function Records({ records, setRecords, projects, showToast }: { records: Record
   );
 }
 
-function CalendarPage({ onOpen }: { onOpen: () => void }) {
+function CalendarPage({ reminders, projects, onOpen, onCreate, onDelete, onToggle }: { reminders: ReminderItem[]; projects: Project[]; onOpen: () => void; onCreate: (reminder: ReminderItem) => void; onDelete: (reminder: ReminderItem) => void; onToggle: (reminder: ReminderItem) => void }) {
+  const [filter, setFilter] = useState("All");
+  const [adding, setAdding] = useState(false);
+  const visible = filter === "All" ? reminders : reminders.filter((event) => event.status === filter);
+  const stats = ["Overdue", "Due Soon", "Normal", "Completed"].map((label) => [label, String(reminders.filter((item) => item.status === label).length)] as const);
+  const addReminder = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const selectedProject = projects.find((item) => String(item.id) === String(form.get("projectId"))) ?? projects[0];
+    if (!selectedProject) return;
+    const dueDate = String(form.get("dueDate"));
+    const reminder: ReminderItem = {
+      id: `local-reminder-${Date.now()}`,
+      title: String(form.get("title")),
+      project: selectedProject.name,
+      projectId: isPersistedId(selectedProject.id) ? String(selectedProject.id) : undefined,
+      stage: String(form.get("stage") || selectedProject.stage),
+      dueDate,
+      status: reminderStatus(dueDate, false),
+      completed: false,
+    };
+    onCreate(reminder);
+    setAdding(false);
+    event.currentTarget.reset();
+  };
+  return <div className="page"><header className="page-header"><div><Eyebrow>PROGRAMME DATES</Eyebrow><h1>Calendar & reminders</h1><p>Submission, approval, site work and completion dates across all projects.</p></div><button className="primary-button" onClick={() => setAdding(!adding)}><Plus size={16} /> Add reminder</button></header>{adding && <form className="inline-form" onSubmit={addReminder}><label>Title<input name="title" required placeholder="e.g. Water meter coordination" /></label><label>Project<select name="projectId">{projects.map((project) => <option value={String(project.id)} key={project.id}>{project.name}</option>)}</select></label><label>Stage<input name="stage" placeholder="Stage / note" /></label><label>Due Date<input name="dueDate" type="date" required /></label><button className="primary-button">Save reminder</button></form>}<div className="filter-tabs">{["All","Normal","Due Soon","Overdue","Completed"].map((item) => <button className={filter === item ? "active" : ""} key={item} onClick={() => setFilter(item)}>{item}</button>)}</div><section className="calendar-grid"><article className="panel programme-panel"><Eyebrow>THIS PROGRAMME</Eyebrow><h2>{reminders.length} important dates</h2><div className="calendar-stats">{stats.map(([label,value]) => <div key={label}><small>{label}</small><strong>{value}</strong></div>)}</div><div className="coordination-note"><BellRing size={20} /><span><strong>Water meter coordination</strong><p>Permanent Water Submission, site completion and meter installation should remain aligned.</p></span></div></article><article className="calendar-events">{visible.map((event) => { const due = new Date(`${event.dueDate}T00:00:00`); return <div className="calendar-event" key={event.id}><button onClick={onOpen}><span className="date-box"><strong>{Number.isNaN(due.getTime()) ? "--" : due.getDate()}</strong><small>{Number.isNaN(due.getTime()) ? "Date" : due.toLocaleDateString("en-GB", { month: "short" })}</small></span><span className={`status-pill ${event.status.toLowerCase().replace(" ", "-")}`}>{event.status}</span><span><strong>{event.title}</strong><small>{event.project} · {event.stage}</small></span><ArrowRight size={17} /></button><div className="record-actions"><button onClick={() => onToggle(event)}>{event.completed ? "Reopen" : "Done"}</button><button className="danger" onClick={() => { if (window.confirm(`Delete reminder ${event.title}?`)) onDelete(event); }}><Trash2 size={15} /></button></div></div>; })}{visible.length === 0 && <div className="panel standalone"><EmptyState title="No dates in this category." /></div>}</article></section></div>;
+}
+
+function TeamPage({ members, onCreate, onDelete }: { members: TeamMember[]; onCreate: (member: TeamMember) => void; onDelete: (member: TeamMember) => void }) {
+  const [adding, setAdding] = useState(false);
+  return <div className="page"><header className="page-header"><div><Eyebrow>ACCESS & RESPONSIBILITY</Eyebrow><h1>Team</h1><p>{members.length} active team members</p></div><button className="primary-button" onClick={() => setAdding(!adding)}><Plus size={16} /> Add employee</button></header>{adding && <form className="inline-form" onSubmit={(event) => { event.preventDefault(); const form = new FormData(event.currentTarget); onCreate({ id: `local-team-${Date.now()}`, name: String(form.get("name")), email: String(form.get("email")), role: String(form.get("role")), active: true, lastSeen: "Just now" }); setAdding(false); event.currentTarget.reset(); }}><label>Full Name<input name="name" required /></label><label>Email<input name="email" type="email" required /></label><label>Role<select name="role"><option>View Only</option><option>Administrator</option></select></label><button className="primary-button">Save employee</button></form>}<div className="team-grid">{members.map((member) => <article className="team-card" key={member.id}><div className="member-head"><span className="member-avatar">{member.name.split(" ").map((v) => v[0]).join("").slice(0,2)}</span><span className="status-pill active">{member.active ? "active" : "inactive"}</span><button className="danger" aria-label={`Delete ${member.name}`} onClick={() => { if (window.confirm(`Delete employee ${member.name}?`)) onDelete(member); }}><Trash2 size={16} /></button></div><h3>{member.name}</h3><p>{member.email}</p><span className="role-pill">{member.role}</span><div className="member-stats"><span><strong>0</strong><small>Assigned projects</small></span><span><strong>{member.role === "Administrator" ? "70" : "0"}</strong><small>Recent actions</small></span></div><footer>Last seen {member.lastSeen}</footer></article>)}</div></div>;
+}
+
+function ActivityPage({ activities }: { activities: ActivityItem[] }) {
+  const [search, setSearch] = useState("");
+  const visible = activities.filter((item) => `${item.action} ${item.detail} ${item.actor}`.toLowerCase().includes(search.toLowerCase()));
+  return <div className="page"><header className="page-header"><div><Eyebrow>AUDIT TRAIL</Eyebrow><h1>Activity log</h1><p>A permanent record of project, stage, user and document changes.</p></div></header><div className="activity-search"><SearchBox value={search} onChange={setSearch} placeholder="Search person, action or project" /></div><div className="activity-list">{visible.map((item) => <article className="activity-row" key={item.id}><span className={`activity-icon ${item.type}`}>{item.type === "plus" ? <Plus size={17} /> : item.type === "upload" ? <Upload size={17} /> : item.type === "delete" ? <Trash2 size={17} /> : item.type === "settings" ? <Settings size={17} /> : <Activity size={17} />}</span><span><strong>{item.action}</strong><p>{item.detail}</p><small>{item.actor} · {item.date}</small></span>{item.type === "refresh" && <em>before → after</em>}</article>)}</div></div>;
+}
+
+function SettingsPage({ settings, onSave }: { settings: SettingsState; onSave: (settings: SettingsState) => void }) {
+  const [draft, setDraft] = useState(settings);
+  return <div className="page"><header className="page-header"><div><Eyebrow>SYSTEM PREFERENCES</Eyebrow><h1>Settings</h1><p>Company identity, file controls, dates, notifications and retention.</p></div></header><form className="settings-form" onSubmit={(event) => { event.preventDefault(); onSave(draft); }}><section className="settings-section"><div className="section-number">01</div><div className="settings-heading"><h2>Company profile</h2><p>Shown throughout your project workspace.</p></div><div className="form-grid"><label>Company Name<input value={draft.companyName} onChange={(event) => setDraft((current) => ({ ...current, companyName: event.target.value }))} /></label><label className="span-2">Company Logo<span className="upload-zone"><span className="brand-mark compact">PT</span><span><strong>Upload company logo</strong><small>PNG, JPG or WEBP</small></span><input type="file" accept="image/png,image/jpeg,image/webp" /></span></label></div></section><section className="settings-section"><div className="section-number">02</div><div className="settings-heading"><h2>Records & notifications</h2><p>Controls for project files and follow-up reminders.</p></div><div className="form-grid four"><label>File Upload Limit (MB)<input type="number" value={draft.fileUploadLimitMb} onChange={(event) => setDraft((current) => ({ ...current, fileUploadLimitMb: Number(event.target.value) }))} /></label><label>Date Format<select value={draft.dateFormat} onChange={(event) => setDraft((current) => ({ ...current, dateFormat: event.target.value }))}><option>DD/MM/YYYY</option><option>YYYY-MM-DD</option><option>DD MMM YYYY</option></select></label><label>Follow-up Reminder (days)<input type="number" value={draft.followUpDays} onChange={(event) => setDraft((current) => ({ ...current, followUpDays: Number(event.target.value) }))} /></label><label>Data Retention<select value={draft.dataRetention} onChange={(event) => setDraft((current) => ({ ...current, dataRetention: event.target.value }))}><option>Permanent</option><option>7 years after completion</option><option>5 years after completion</option></select></label></div><div className="info-note"><ShieldCheck size={18} /><p>The default 14-stage workflow, status colours, Administrator and View Only permission model are protected system controls.</p></div></section><button className="primary-button save-settings">Save settings</button></form></div>;
+}
+
+function LegacyCalendarPage({ onOpen }: { onOpen: () => void }) {
   const [filter, setFilter] = useState("All");
   const events = [{ day: "5", month: "Mar", status: "Completed", title: "DP & DC Clearance" },{ day: "9", month: "Jul", status: "Overdue", title: "Temporary Water Submission" }];
   const visible = filter === "All" ? events : events.filter((event) => event.status === filter);
   return <div className="page"><header className="page-header"><div><Eyebrow>PROGRAMME DATES</Eyebrow><h1>Calendar & reminders</h1><p>Submission, approval, site work and completion dates across all projects.</p></div></header><div className="filter-tabs">{["All","Normal","Due Soon","Overdue","Completed"].map((item) => <button className={filter === item ? "active" : ""} key={item} onClick={() => setFilter(item)}>{item}</button>)}</div><section className="calendar-grid"><article className="panel programme-panel"><Eyebrow>THIS PROGRAMME</Eyebrow><h2>2 important dates</h2><div className="calendar-stats">{[["Overdue","1"],["Due Soon","0"],["Normal","0"],["Completed","1"]].map(([label,value]) => <div key={label}><small>{label}</small><strong>{value}</strong></div>)}</div><div className="coordination-note"><BellRing size={20} /><span><strong>Water meter coordination</strong><p>Permanent Water Submission, site completion and meter installation should remain aligned.</p></span></div></article><article className="calendar-events">{visible.map((event) => <button className="calendar-event" key={event.status} onClick={onOpen}><span className="date-box"><strong>{event.day}</strong><small>{event.month}</small></span><span className={`status-pill ${event.status.toLowerCase().replace(" ", "-")}`}>{event.status}</span><span><strong>{event.title}</strong><small>754 MOUNTBATTEN ROAD · hock hwa builders pte ltd</small></span><ArrowRight size={17} /></button>)}{visible.length === 0 && <div className="panel standalone"><EmptyState title="No dates in this category." /></div>}</article></section></div>;
 }
 
-function TeamPage({ showToast }: { showToast: (message: string) => void }) {
+function LegacyTeamPage({ showToast }: { showToast: (message: string) => void }) {
   const [adding, setAdding] = useState(false); const [members, setMembers] = useState([{ name: "Chen QingYu", email: "qingyuc832@gmail.com", role: "Administrator" }]);
   return <div className="page"><header className="page-header"><div><Eyebrow>ACCESS & RESPONSIBILITY</Eyebrow><h1>Team</h1><p>{members.length} active team members</p></div><button className="primary-button" onClick={() => setAdding(!adding)}><Plus size={16} /> Add employee</button></header>{adding && <form className="inline-form" onSubmit={(event) => { event.preventDefault(); const form = new FormData(event.currentTarget); setMembers((current) => [...current, { name: String(form.get("name")), email: String(form.get("email")), role: String(form.get("role")) }]); setAdding(false); showToast("Employee added"); }}><label>Full Name<input name="name" required /></label><label>Email<input name="email" type="email" required /></label><label>Role<select name="role"><option>View Only</option><option>Administrator</option></select></label><button className="primary-button">Save employee</button></form>}<div className="team-grid">{members.map((member) => <article className="team-card" key={member.email}><div className="member-head"><span className="member-avatar">{member.name.split(" ").map((v) => v[0]).join("").slice(0,2)}</span><span className="status-pill active">active</span><button aria-label="Member actions"><MoreHorizontal size={18} /></button></div><h3>{member.name}</h3><p>{member.email}</p><span className="role-pill">{member.role}</span><div className="member-stats"><span><strong>0</strong><small>Assigned projects</small></span><span><strong>{member.role === "Administrator" ? "70" : "0"}</strong><small>Recent actions</small></span></div><footer>Last seen 08 Aug 2026</footer></article>)}</div></div>;
 }
 
-function ActivityPage() {
+function LegacyActivityPage() {
   const [search, setSearch] = useState(""); const visible = activitySeed.filter((item) => `${item[0]} ${item[1]}`.toLowerCase().includes(search.toLowerCase()));
   return <div className="page"><header className="page-header"><div><Eyebrow>AUDIT TRAIL</Eyebrow><h1>Activity log</h1><p>A permanent record of project, stage, user and document changes.</p></div></header><div className="activity-search"><SearchBox value={search} onChange={setSearch} placeholder="Search person, action or project" /></div><div className="activity-list">{visible.map(([action,detail,date,type], index) => <article className="activity-row" key={`${action}-${index}`}><span className={`activity-icon ${type}`}>{type === "plus" ? <Plus size={17} /> : type === "upload" ? <Upload size={17} /> : <Activity size={17} />}</span><span><strong>{action}</strong><p>{detail}</p><small>qingyuc832@gmail.com · {date}</small></span>{type === "refresh" && <em>before → after</em>}</article>)}</div></div>;
 }
 
-function SettingsPage({ showToast }: { showToast: (message: string) => void }) {
+function LegacySettingsPage({ showToast }: { showToast: (message: string) => void }) {
   return <div className="page"><header className="page-header"><div><Eyebrow>SYSTEM PREFERENCES</Eyebrow><h1>Settings</h1><p>Company identity, file controls, dates, notifications and retention.</p></div></header><form className="settings-form" onSubmit={(e) => { e.preventDefault(); showToast("Settings saved"); }}><section className="settings-section"><div className="section-number">01</div><div className="settings-heading"><h2>Company profile</h2><p>Shown throughout your project workspace.</p></div><div className="form-grid"><label>Company Name<input defaultValue="PlumbTrack Contractor" /></label><label className="span-2">Company Logo<span className="upload-zone"><span className="brand-mark compact">PT</span><span><strong>Upload company logo</strong><small>PNG, JPG or WEBP</small></span><input type="file" accept="image/png,image/jpeg,image/webp" /></span></label></div></section><section className="settings-section"><div className="section-number">02</div><div className="settings-heading"><h2>Records & notifications</h2><p>Controls for project files and follow-up reminders.</p></div><div className="form-grid four"><label>File Upload Limit (MB)<input type="number" defaultValue="25" /></label><label>Date Format<select defaultValue="DD/MM/YYYY"><option>DD/MM/YYYY</option><option>YYYY-MM-DD</option><option>DD MMM YYYY</option></select></label><label>Follow-up Reminder (days)<input type="number" defaultValue="7" /></label><label>Data Retention<select><option>Permanent</option><option>7 years after completion</option><option>5 years after completion</option></select></label></div><div className="info-note"><ShieldCheck size={18} /><p>The default 14-stage workflow, status colours, Administrator and View Only permission model are protected system controls.</p></div></section><button className="primary-button save-settings">Save settings</button></form></div>;
 }
 
-function ProjectDetail({ project, onBack, onUpdate, onUpload, showToast }: { project: Project; onBack: () => void; onUpdate: (patch: Partial<Project>) => void; onUpload: (record: RecordItem) => void; showToast: (message: string) => void }) {
-  const [expanded, setExpanded] = useState(0); const [statuses, setStatuses] = useState<StageStatus[]>(() => stages.map((_, index): StageStatus => index < project.step - 1 ? "Completed" : index === project.step - 1 ? "Waiting Approval" : (index === 3 || index === 5) ? "N/A" : "Not Started"));
+void [LegacyCalendarPage, LegacyTeamPage, LegacyActivityPage, LegacySettingsPage];
+
+function ProjectDetail({
+  project,
+  onBack,
+  onUpdate,
+  onDelete,
+  onUpload,
+  showToast,
+}: {
+  project: Project;
+  onBack: () => void;
+  onUpdate: (patch: Partial<Project>) => void;
+  onDelete: () => void;
+  onUpload: (record: RecordItem) => void;
+  showToast: (message: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(0);
+  const [statuses, setStatuses] = useState<StageStatus[]>(() =>
+    stages.map((_, index): StageStatus =>
+      index < project.step - 1
+        ? "Completed"
+        : index === project.step - 1
+          ? "Waiting Approval"
+          : index === 3 || index === 5
+            ? "N/A"
+            : "Not Started",
+    ),
+  );
   const uploadRef = useRef<HTMLInputElement>(null);
-  return <div className="page detail-page"><button className="back-button" onClick={onBack}><ArrowLeft size={16} /> Back to projects</button><section className="project-hero"><div className="project-initial hero-initial">{project.code}</div><div className="hero-copy"><div className="hero-badges"><span>{project.reference}</span><span className="status-pill active">{project.active ? "Active" : "Completed"}</span></div><h1>{project.name}</h1><p>{project.description}</p></div><div className="hero-progress"><strong>{project.progress}%</strong><span>complete</span></div></section><section className="project-summary"><div><small>CURRENT STAGE</small><strong>STEP {project.step}</strong><span>{project.stage}</span></div>{[["Maincon",project.maincon],["Person in Charge",project.pic],["Start Date",project.start],["Target Completion",project.target],["Last Updated","08 Aug 2026"],["Records",String(project.records)]].map(([label,value]) => <div key={label}><small>{label}</small><strong>{value}</strong></div>)}</section><div className="timeline-heading"><div><Eyebrow>STANDARD WORKFLOW</Eyebrow><h2>Project timeline</h2></div><div className="legend"><span className="done">Completed</span><span className="doing">In progress</span><span>Waiting</span></div></div><section className="timeline">{stages.map(([name, description], index) => { const open = expanded === index; const status = statuses[index]; return <article className={`stage-card ${open ? "expanded" : ""}`} key={name}><span className={`timeline-number ${status.toLowerCase().replace(" ", "-")}`}>{index + 1}</span><button className="stage-header" onClick={() => setExpanded(open ? -1 : index)} aria-expanded={open}><span><small>STEP {String(index + 1).padStart(2,"0")}</small><h3>{name}</h3><p>{description}</p></span><span className={`status-pill ${status.toLowerCase().replace(" ", "-")}`}>{status}</span><span>{index === 0 ? project.records : 0} records</span><ChevronDown size={18} /></button>{open && <div className="stage-body"><div className="form-grid four"><label>Stage Status<select value={status} onChange={(e) => setStatuses((current) => current.map((v,i) => i === index ? (e.target.value as StageStatus) : v))}><option>Not Started</option><option>In Progress</option><option>Waiting Approval</option><option>Completed</option><option>N/A</option></select></label><label>Expected Date<input type="date" /></label><label>Actual Completion Date<input type="date" /></label><label>{index === 0 ? "DC Clearance Status" : "Approval Reference"}<input defaultValue={index === 0 ? "Received already" : ""} /></label><label className="span-2">Site Notes<textarea placeholder="Add site notes, approval follow-up or work observations…" /></label></div><div className="files-block"><div><h4>Files & Photos</h4><p>Revision history and uploaded records for this stage.</p></div><input ref={uploadRef} className="hidden-input" type="file" onChange={(e) => { const file=e.target.files?.[0]; if (!file) return; const record: RecordItem = { id: Date.now(), name: file.name, size: `${(file.size / 1024 / 1024).toFixed(2)} MB`, project: project.name, stage: `Step ${index+1} · ${name}`, category: "Other Record", revision: "Rev 1", date: "08 Aug 2026", uploader: "qingyuc832@gmail.com" }; onUpload(record); onUpdate({ records: project.records + 1 }); showToast("File added to local preview"); }} /><button className="secondary-button" onClick={() => uploadRef.current?.click()}><Plus size={15} /> Upload files / photos</button></div><p className="empty-file">No files uploaded for this step yet.</p><p className="last-updated">Last updated 08 Aug 2026 by qingyuc832@gmail.com</p><button className="primary-button stage-save" onClick={() => { showToast("Stage changes saved"); if (status === "Completed") onUpdate({ progress: Math.min(100, Math.round((statuses.filter((s) => s === "Completed").length + 1) / statuses.filter((s) => s !== "N/A").length * 100)) }); }}>Save stage changes</button></div>}</article>; })}</section><section className="close-project panel"><Eyebrow>FINAL CONTROL</Eyebrow><h2>Complete & Close Project</h2><p>Missing items are shown as guidance only. You may still close the project when some records are kept for internal tracking.</p><div className="completion-summary"><strong>2/14</strong><span>key completion checks ready</span></div><div className="check-grid">{["DP & DC Clearance saved","Temporary Water Submission","Shop Drawing approved","Form B completed (if applicable)","Underground Works completed","Form B Part 1 & Part 2 (if applicable)","Permanent Water Submission","Water Meter installed","As-built Drawing uploaded","Form C submitted","Testing Record uploaded","Sanitary Fixtures completed","Completion photos uploaded","OMM submitted"].map((item,index) => <span className={index === 0 || index === 3 ? "ready" : ""} key={item}>{index === 0 || index === 3 ? <Check size={13} /> : <i />} {item}</span>)}</div><button className="danger-button" onClick={() => { if (window.confirm("Close this project? This will be recorded in the activity log.")) { onUpdate({ active: false, progress: 100 }); showToast("Project closed and logged"); } }}>Complete & Close Project</button></section></div>;
+
+  const saveStage = (stageNumber: number, status: StageStatus) => {
+    if (isPersistedId(project.id)) {
+      plumbtrackApi("saveStage", {
+        projectId: project.id,
+        stageNumber,
+        status,
+      }).catch((error: unknown) =>
+        showToast(error instanceof Error ? error.message : "Stage sync failed"),
+      );
+    }
+
+    if (status === "Completed") {
+      const applicableStages = statuses.filter((stageStatus) => stageStatus !== "N/A").length;
+      const completedStages = statuses.filter((stageStatus) => stageStatus === "Completed").length + 1;
+      onUpdate({
+        progress: Math.min(100, Math.round((completedStages / Math.max(1, applicableStages)) * 100)),
+      });
+    }
+
+    showToast("Stage changes saved");
+  };
+
+  const uploadStageFile = (file: File, stageNumber: number, stageName: string) => {
+    const record: RecordItem = {
+      id: `local-record-${Date.now()}`,
+      name: file.name,
+      size: `${(file.size / 1024 / 1024).toFixed(2)} MB`,
+      project: project.name,
+      projectId: isPersistedId(project.id) ? String(project.id) : undefined,
+      stage: `Step ${stageNumber} · ${stageName}`,
+      stageNumber,
+      category: "Other Record",
+      revision: "Rev 1",
+      date: new Date().toLocaleDateString("en-GB", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      }),
+      uploader: "server sync",
+      mimeType: file.type || "application/octet-stream",
+      sizeBytes: file.size,
+      storagePath: `${project.id}/${Date.now()}-${file.name}`,
+      file,
+    };
+
+    onUpload(record);
+    onUpdate({ records: project.records + 1 });
+    showToast("File record saved");
+  };
+
+  return (
+    <div className="page detail-page">
+      <div className="form-actions">
+        <button className="back-button" onClick={onBack}>
+          <ArrowLeft size={16} /> Back to projects
+        </button>
+        <button className="danger-button" onClick={onDelete}>
+          <Trash2 size={16} /> Delete Project
+        </button>
+      </div>
+
+      <section className="project-hero">
+        <div className="project-initial hero-initial">{project.code}</div>
+        <div className="hero-copy">
+          <div className="hero-badges">
+            <span>{project.reference}</span>
+            <span className="status-pill active">{project.active ? "Active" : "Completed"}</span>
+          </div>
+          <h1>{project.name}</h1>
+          <p>{project.description}</p>
+        </div>
+        <div className="hero-progress">
+          <strong>{project.progress}%</strong>
+          <span>complete</span>
+        </div>
+      </section>
+
+      <section className="project-summary">
+        <div>
+          <small>CURRENT STAGE</small>
+          <strong>STEP {project.step}</strong>
+          <span>{project.stage}</span>
+        </div>
+        {[
+          ["Maincon", project.maincon],
+          ["Person in Charge", project.pic],
+          ["Start Date", project.start],
+          ["Target Completion", project.target],
+          ["Last Updated", "08 Aug 2026"],
+          ["Records", String(project.records)],
+        ].map(([label, value]) => (
+          <div key={label}>
+            <small>{label}</small>
+            <strong>{value}</strong>
+          </div>
+        ))}
+      </section>
+
+      <div className="timeline-heading">
+        <div>
+          <Eyebrow>STANDARD WORKFLOW</Eyebrow>
+          <h2>Project timeline</h2>
+        </div>
+        <div className="legend">
+          <span className="done">Completed</span>
+          <span className="doing">In progress</span>
+          <span>Waiting</span>
+        </div>
+      </div>
+
+      <section className="timeline">
+        {stages.map(([name, description], index) => {
+          const open = expanded === index;
+          const status = statuses[index];
+          const stageNumber = index + 1;
+          const statusClassName = status.toLowerCase().replaceAll(" ", "-");
+
+          return (
+            <article className={`stage-card ${open ? "expanded" : ""}`} key={name}>
+              <span className={`timeline-number ${statusClassName}`}>{stageNumber}</span>
+              <button className="stage-header" onClick={() => setExpanded(open ? -1 : index)} aria-expanded={open}>
+                <span>
+                  <small>STEP {String(stageNumber).padStart(2, "0")}</small>
+                  <h3>{name}</h3>
+                  <p>{description}</p>
+                </span>
+                <span className={`status-pill ${statusClassName}`}>{status}</span>
+                <span>{index === 0 ? project.records : 0} records</span>
+                <ChevronDown size={18} />
+              </button>
+
+              {open && (
+                <div className="stage-body">
+                  <div className="form-grid four">
+                    <label>
+                      Stage Status
+                      <select
+                        value={status}
+                        onChange={(event) =>
+                          setStatuses((current) =>
+                            current.map((value, itemIndex) =>
+                              itemIndex === index ? (event.target.value as StageStatus) : value,
+                            ),
+                          )
+                        }
+                      >
+                        <option>Not Started</option>
+                        <option>In Progress</option>
+                        <option>Waiting Approval</option>
+                        <option>Completed</option>
+                        <option>N/A</option>
+                      </select>
+                    </label>
+                    <label>
+                      Expected Date
+                      <input type="date" />
+                    </label>
+                    <label>
+                      Actual Completion Date
+                      <input type="date" />
+                    </label>
+                    <label>
+                      {index === 0 ? "DC Clearance Status" : "Approval Reference"}
+                      <input defaultValue={index === 0 ? "Received already" : ""} />
+                    </label>
+                    <label className="span-2">
+                      Site Notes
+                      <textarea placeholder="Add site notes, approval follow-up or work observations…" />
+                    </label>
+                  </div>
+
+                  <div className="files-block">
+                    <div>
+                      <h4>Files & Photos</h4>
+                      <p>Revision history and uploaded records for this stage.</p>
+                    </div>
+                    <input
+                      ref={uploadRef}
+                      className="hidden-input"
+                      type="file"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (!file) return;
+                        uploadStageFile(file, stageNumber, name);
+                        event.currentTarget.value = "";
+                      }}
+                    />
+                    <button className="secondary-button" onClick={() => uploadRef.current?.click()}>
+                      <Plus size={15} /> Upload files / photos
+                    </button>
+                  </div>
+
+                  <p className="empty-file">No files uploaded for this step yet.</p>
+                  <p className="last-updated">Last updated 08 Aug 2026 by qingyuc832@gmail.com</p>
+                  <button className="primary-button stage-save" onClick={() => saveStage(stageNumber, status)}>
+                    Save stage changes
+                  </button>
+                </div>
+              )}
+            </article>
+          );
+        })}
+      </section>
+
+      <section className="close-project panel">
+        <Eyebrow>FINAL CONTROL</Eyebrow>
+        <h2>Complete & Close Project</h2>
+        <p>Missing items are shown as guidance only. You may still close the project when some records are kept for internal tracking.</p>
+        <div className="completion-summary">
+          <strong>2/14</strong>
+          <span>key completion checks ready</span>
+        </div>
+        <div className="check-grid">
+          {[
+            "DP & DC Clearance saved",
+            "Temporary Water Submission",
+            "Shop Drawing approved",
+            "Form B completed (if applicable)",
+            "Underground Works completed",
+            "Form B Part 1 & Part 2 (if applicable)",
+            "Permanent Water Submission",
+            "Water Meter installed",
+            "As-built Drawing uploaded",
+            "Form C submitted",
+            "Testing Record uploaded",
+            "Sanitary Fixtures completed",
+            "Completion photos uploaded",
+            "OMM submitted",
+          ].map((item, index) => (
+            <span className={index === 0 || index === 3 ? "ready" : ""} key={item}>
+              {index === 0 || index === 3 ? <Check size={13} /> : <i />} {item}
+            </span>
+          ))}
+        </div>
+        <button
+          className="danger-button"
+          onClick={() => {
+            if (window.confirm("Close this project? This will be recorded in the activity log.")) {
+              onUpdate({ active: false, progress: 100 });
+              showToast("Project closed and logged");
+            }
+          }}
+        >
+          Complete & Close Project
+        </button>
+      </section>
+    </div>
+  );
 }
 
 function NewProjectPage({ onCancel, onCreate }: { onCancel: () => void; onCreate: (data: ProjectForm) => void }) {
