@@ -189,7 +189,6 @@ type JsonPayload = {
   projectId?: string | number;
   stageNumber?: number;
   status?: string;
-  advance?: boolean;
   details?: StageDetail;
   patch?: Partial<Project>;
   record?: RecordItem;
@@ -652,16 +651,17 @@ export async function POST(request: Request) {
 
   if (payload.action === "saveStage") {
     if (!isUuid(payload.projectId) || !payload.stageNumber) return NextResponse.json({ connected: false });
-    if (toDbStageStatus(payload.status) !== "completed") {
-      return errorResponse("Select Completed before saving this stage.");
-    }
-    const shouldAdvance = payload.advance !== false;
+    const dbStatus = toDbStageStatus(payload.status);
     const stageDetails = payload.details;
-    const completionDate = stageDetails?.actualCompletionDate || new Date().toISOString().slice(0, 10);
+    const completionDate =
+      dbStatus === "completed"
+        ? stageDetails?.actualCompletionDate || new Date().toISOString().slice(0, 10)
+        : stageDetails?.actualCompletionDate || null;
     const { data: stage, error } = await supabase
       .from("project_stages")
       .update({
-        status: "completed",
+        status: dbStatus,
+        applicable: dbStatus !== "not_applicable",
         expected_date: stageDetails?.expectedDate || null,
         actual_completion_date: completionDate,
         notes: stageDetails?.notes || null,
@@ -683,36 +683,6 @@ export async function POST(request: Request) {
         { onConflict: "stage_id,field_key" },
       );
       if (fieldError) return errorResponse(fieldError.message);
-    }
-
-    if (shouldAdvance) {
-      const { error: resetFutureError } = await supabase
-        .from("project_stages")
-        .update({ status: "not_started" })
-        .eq("project_id", payload.projectId)
-        .eq("applicable", true)
-        .gt("stage_number", stageRow.stage_number)
-        .neq("status", "completed");
-      if (resetFutureError) return errorResponse(resetFutureError.message);
-
-      const { data: nextStage } = await supabase
-        .from("project_stages")
-        .select("id,stage_number,name")
-        .eq("project_id", payload.projectId)
-        .eq("applicable", true)
-        .gt("stage_number", stageRow.stage_number)
-        .neq("status", "completed")
-        .order("stage_number", { ascending: true })
-        .limit(1)
-        .maybeSingle();
-
-      if (nextStage) {
-        const { error: nextStageError } = await supabase
-          .from("project_stages")
-          .update({ status: "in_progress" })
-          .eq("id", (nextStage as { id: string }).id);
-        if (nextStageError) return errorResponse(nextStageError.message);
-      }
     }
 
     const { data: allStages, error: countError } = await supabase
