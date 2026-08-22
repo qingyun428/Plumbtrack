@@ -292,6 +292,7 @@ function reminderStatus(dueDate: string, completed: boolean): ReminderItem["stat
 
 function toDbStageStatus(status: string | undefined) {
   const normalized = (status ?? "").toLowerCase();
+  if (normalized === "waiting process" || normalized === "waiting_approval") return "waiting_approval";
   if (normalized.includes("progress")) return "in_progress";
   if (normalized.includes("complete")) return "completed";
   if (normalized === "n/a" || normalized.includes("not_applicable")) return "not_applicable";

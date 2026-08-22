@@ -134,6 +134,7 @@ type StageDetail = {
 type StageStatus =
   | "Not Started"
   | "In Progress"
+  | "Waiting process"
   | "Completed"
   | "N/A";
 
@@ -1346,7 +1347,8 @@ void [LegacyCalendarPage, LegacyTeamPage, LegacyActivityPage, LegacySettingsPage
 
 function stageStatusFromDb(status: string | undefined): StageStatus {
   if (status === "completed") return "Completed";
-  if (status === "in_progress" || status === "waiting_approval") return "In Progress";
+  if (status === "in_progress") return "In Progress";
+  if (status === "waiting_approval") return "Waiting process";
   if (status === "not_applicable") return "N/A";
   return "Not Started";
 }
@@ -1364,7 +1366,7 @@ function buildInitialStageStatuses(project: Project): StageStatus[] {
     statuses[stage.stageNumber - 1] = stageStatusFromDb(stage.status);
   });
 
-  if (statuses.some((status) => status === "In Progress")) return statuses;
+  if (statuses.some((status) => status === "In Progress" || status === "Waiting process")) return statuses;
   if (statuses.every((status) => status === "Completed" || status === "N/A")) return statuses;
 
   const currentIndex = Math.max(0, Math.min(stages.length - 1, project.step - 1));
@@ -1422,7 +1424,9 @@ function ProjectDetail({
 }) {
   const initialStatuses = useMemo(() => buildInitialStageStatuses(project), [project]);
   const [expanded, setExpanded] = useState(() => {
-    const initialIndex = initialStatuses.findIndex((status) => status === "In Progress");
+    const initialIndex = initialStatuses.findIndex(
+      (status) => status === "In Progress" || status === "Waiting process",
+    );
     return initialIndex >= 0 ? initialIndex : -1;
   });
   const [statuses, setStatuses] = useState<StageStatus[]>(initialStatuses);
@@ -1477,7 +1481,7 @@ function ProjectDetail({
       stage: nextCurrentIndex >= 0 ? stages[nextCurrentIndex][0] : "All stages completed",
       stageStatuses: nextStatuses.map((nextStatus, index) => ({
         stageNumber: index + 1,
-        status: nextStatus === "In Progress" ? "in_progress" : nextStatus === "Completed" ? "completed" : nextStatus === "N/A" ? "not_applicable" : "not_started",
+        status: nextStatus === "In Progress" ? "in_progress" : nextStatus === "Waiting process" ? "waiting_approval" : nextStatus === "Completed" ? "completed" : nextStatus === "N/A" ? "not_applicable" : "not_started",
       })),
       stageDetails: nextStageDrafts,
     });
@@ -1601,7 +1605,7 @@ function ProjectDetail({
           const stageButtonLabel = status === "Completed" ? "Save completed stage" : "Save stage details";
 
           return (
-            <article className={`stage-card ${open ? "expanded" : ""} ${status === "In Progress" ? "current" : ""} ${statusClassName}`} key={name}>
+            <article className={`stage-card ${open ? "expanded" : ""} ${status === "In Progress" || status === "Waiting process" ? "current" : ""} ${statusClassName}`} key={name}>
               <span className={`timeline-number ${statusClassName}`}>{stageNumber}</span>
               <button
                 className="stage-header"
@@ -1636,6 +1640,7 @@ function ProjectDetail({
                       >
                         <option>Not Started</option>
                         <option>In Progress</option>
+                        <option>Waiting process</option>
                         <option>Completed</option>
                         <option>N/A</option>
                       </select>
